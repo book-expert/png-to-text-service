@@ -19,6 +19,12 @@ import (
 	"github.com/nnikolov3/png-to-text-service/internal/ocr"
 )
 
+const (
+	// File permissions.
+	defaultFilePermission = 0o600
+	defaultDirPermission  = 0o750
+)
+
 var ErrAPIKeyNotFound = errors.New("API key not found in environment variable")
 
 // OCRProcessor defines the interface for OCR processing.
@@ -149,16 +155,13 @@ func (p *Pipeline) ProcessDirectory(
 	p.logger.Info("Found %d PNG files to process", len(pngFiles))
 
 	// Ensure output directory exists
-	mkdirErr := os.MkdirAll(outputDir, 0o755)
+	mkdirErr := os.MkdirAll(outputDir, defaultDirPermission)
 	if mkdirErr != nil {
 		return fmt.Errorf("create output directory: %w", mkdirErr)
 	}
 
 	// Process files in parallel
-	results, err := p.processFilesParallel(ctx, pngFiles, inputDir, outputDir)
-	if err != nil {
-		return fmt.Errorf("process files: %w", err)
-	}
+	results := p.processFilesParallel(ctx, pngFiles, inputDir, outputDir)
 
 	// Report results
 	p.reportResults(results, startTime)
@@ -174,15 +177,14 @@ func (p *Pipeline) ProcessSingle(ctx context.Context, pngPath, outputPath string
 
 	// Ensure output directory exists
 	outputDir := filepath.Dir(outputPath)
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+
+	err := os.MkdirAll(outputDir, defaultDirPermission)
+	if err != nil {
 		return fmt.Errorf("create output directory: %w", err)
 	}
 
 	// Process the file
-	result, err := p.processFile(ctx, pngPath, outputPath)
-	if err != nil {
-		return fmt.Errorf("process file: %w", err)
-	}
+	result := p.processFile(ctx, pngPath, outputPath)
 
 	// Report result
 	duration := time.Since(startTime)
@@ -199,21 +201,24 @@ func (p *Pipeline) ProcessSingle(ctx context.Context, pngPath, outputPath string
 func (p *Pipeline) findPNGFiles(dir string) ([]string, error) {
 	var pngFiles []string
 
-	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
+	err := filepath.WalkDir(
+		dir,
+		func(path string, dirEntry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
 
-		if d.IsDir() {
+			if dirEntry.IsDir() {
+				return nil
+			}
+
+			if strings.HasSuffix(strings.ToLower(dirEntry.Name()), ".png") {
+				pngFiles = append(pngFiles, path)
+			}
+
 			return nil
-		}
-
-		if strings.HasSuffix(strings.ToLower(d.Name()), ".png") {
-			pngFiles = append(pngFiles, path)
-		}
-
-		return nil
-	})
+		},
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -229,16 +234,16 @@ func (p *Pipeline) processFilesParallel(
 	ctx context.Context,
 	pngFiles []string,
 	inputDir, outputDir string,
-) ([]ProcessingResult, error) {
+) []ProcessingResult {
 	jobs := make(chan string, len(pngFiles))
 	results := make(chan ProcessingResult, len(pngFiles))
 
 	// Start workers
-	var wg sync.WaitGroup
+	var waitGroup sync.WaitGroup
 	for range p.workers {
-		wg.Add(1)
+		waitGroup.Add(1)
 
-		go p.worker(ctx, &wg, jobs, results, inputDir, outputDir)
+		go p.worker(ctx, &waitGroup, jobs, results, inputDir, outputDir)
 	}
 
 	// Send jobs
@@ -250,7 +255,7 @@ func (p *Pipeline) processFilesParallel(
 
 	// Wait for workers to complete
 	go func() {
-		wg.Wait()
+		waitGroup.Wait()
 		close(results)
 	}()
 
@@ -260,18 +265,18 @@ func (p *Pipeline) processFilesParallel(
 		allResults = append(allResults, result)
 	}
 
-	return allResults, nil
+	return allResults
 }
 
 // worker is a worker goroutine that processes PNG files.
 func (p *Pipeline) worker(
 	ctx context.Context,
-	wg *sync.WaitGroup,
+	waitGroup *sync.WaitGroup,
 	jobs <-chan string,
 	results chan<- ProcessingResult,
 	inputDir, outputDir string,
 ) {
-	defer wg.Done()
+	defer waitGroup.Done()
 
 	for pngPath := range jobs {
 		// Check for cancellation
@@ -312,20 +317,7 @@ func (p *Pipeline) worker(
 		outputPath := filepath.Join(outputDir, filepath.Dir(relPath), txtName)
 
 		// Process the file
-		result, err := p.processFile(ctx, pngPath, outputPath)
-		if err != nil {
-			results <- ProcessingResult{
-				ProcessedAt:   time.Time{},
-				Error:         err,
-				PNGPath:       pngPath,
-				OutputPath:    "",
-				OCRText:       "",
-				AugmentedText: "",
-				Success:       false,
-			}
-
-			continue
-		}
+		result := p.processFile(ctx, pngPath, outputPath)
 
 		results <- result
 	}
@@ -335,7 +327,7 @@ func (p *Pipeline) worker(
 func (p *Pipeline) processFile(
 	ctx context.Context,
 	pngPath, outputPath string,
-) (ProcessingResult, error) {
+) ProcessingResult {
 	result := ProcessingResult{
 		ProcessedAt:   time.Now(),
 		Error:         nil,
@@ -356,7 +348,7 @@ func (p *Pipeline) processFile(
 
 			result.Success = true
 
-			return result, nil
+			return result
 		}
 	}
 
@@ -367,7 +359,7 @@ func (p *Pipeline) processFile(
 	if err != nil {
 		result.Error = fmt.Errorf("OCR processing: %w", err)
 
-		return result, nil
+		return result
 	}
 
 	result.OCRText = ocrText
@@ -396,7 +388,7 @@ func (p *Pipeline) processFile(
 	if err := p.writeOutput(outputPath, finalText); err != nil {
 		result.Error = fmt.Errorf("write output: %w", err)
 
-		return result, nil
+		return result
 	}
 
 	result.Success = true
@@ -407,7 +399,7 @@ func (p *Pipeline) processFile(
 		filepath.Base(outputPath),
 	)
 
-	return result, nil
+	return result
 }
 
 // writeOutput writes the final text to the output file.
@@ -415,7 +407,7 @@ func (p *Pipeline) writeOutput(outputPath, text string) error {
 	// Ensure the directory exists
 	dir := filepath.Dir(outputPath)
 
-	err := os.MkdirAll(dir, 0o755)
+	err := os.MkdirAll(dir, defaultDirPermission)
 	if err != nil {
 		return fmt.Errorf("create directory: %w", err)
 	}
@@ -424,7 +416,7 @@ func (p *Pipeline) writeOutput(outputPath, text string) error {
 	err = os.WriteFile(
 		outputPath,
 		[]byte(text),
-		0o644,
+		defaultFilePermission,
 	)
 	if err != nil {
 		return fmt.Errorf("write file: %w", err)

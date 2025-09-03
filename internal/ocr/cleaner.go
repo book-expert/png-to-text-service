@@ -6,6 +6,11 @@ import (
 	"strings"
 )
 
+const (
+	// Buffer sizes for scanner operations.
+	initialBufferSize = 64 * 1024
+)
+
 // Cleaner provides text cleaning functionality for OCR output.
 type Cleaner struct {
 	// Precompiled regex patterns for performance
@@ -95,7 +100,7 @@ func (c *Cleaner) cleanLines(input string) string {
 	// Increase scanner buffer to handle long lines
 	const maxLineSize = 1024 * 1024
 
-	buf := make([]byte, 0, 64*1024)
+	buf := make([]byte, 0, initialBufferSize)
 	scanner.Buffer(buf, maxLineSize)
 
 	first := true

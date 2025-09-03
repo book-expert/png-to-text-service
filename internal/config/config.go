@@ -11,6 +11,11 @@ import (
 	"github.com/nnikolov3/configurator"
 )
 
+const (
+	// Directory permissions.
+	defaultDirPermission = 0o750
+)
+
 var (
 	ErrInputDirRequired  = errors.New("paths.input_dir is required")
 	ErrOutputDirRequired = errors.New("paths.output_dir is required")
@@ -195,7 +200,7 @@ func (c *Config) EnsureDirectories() error {
 	}
 
 	for _, dir := range dirs {
-		err := os.MkdirAll(dir, 0o755)
+		err := os.MkdirAll(dir, defaultDirPermission)
 		if err != nil {
 			return fmt.Errorf("create directory %s: %w", dir, err)
 		}

@@ -41,7 +41,7 @@ func (h *testHelper) createTempDir(prefix string) (string, func()) {
 func (h *testHelper) writeConfigFile(dir, content string) string {
 	configPath := filepath.Join(dir, "project.toml")
 
-	err := os.WriteFile(configPath, []byte(content), 0o644)
+	err := os.WriteFile(configPath, []byte(content), 0o600)
 	if err != nil {
 		h.t.Fatalf("Failed to write config file: %v", err)
 	}
@@ -332,10 +332,10 @@ func TestConfig_validate(t *testing.T) {
 		),
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-			tt.runConfigLoadTest(t)
+			testCase.runConfigLoadTest(t)
 		})
 	}
 }
@@ -364,24 +364,28 @@ func TestConfig_GetAPIKey(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 
-			if tt.envKey != "" && tt.envVal != "" {
+			if testCase.envKey != "" && testCase.envVal != "" {
 				envHelper := newEnvTestHelper(t)
-				envHelper.withEnvVar(tt.envKey, tt.envVal, func() {
-					if got := tt.config.GetAPIKey(); got != tt.want {
-						t.Errorf(
-							"Config.GetAPIKey() = %v, want %v",
-							got,
-							tt.want,
-						)
-					}
-				})
+				envHelper.withEnvVar(
+					testCase.envKey,
+					testCase.envVal,
+					func() {
+						if got := testCase.config.GetAPIKey(); got != testCase.want {
+							t.Errorf(
+								"Config.GetAPIKey() = %v, want %v",
+								got,
+								testCase.want,
+							)
+						}
+					},
+				)
 			} else {
-				if got := tt.config.GetAPIKey(); got != tt.want {
-					t.Errorf("Config.GetAPIKey() = %v, want %v", got, tt.want)
+				if got := testCase.config.GetAPIKey(); got != testCase.want {
+					t.Errorf("Config.GetAPIKey() = %v, want %v", got, testCase.want)
 				}
 			}
 		})
@@ -441,13 +445,16 @@ func BenchmarkConfig_Load(b *testing.B) {
 	}()
 
 	configPath := filepath.Join(tmpDir, "project.toml")
-	if err := os.WriteFile(configPath, []byte(createValidConfigContent()), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte(createValidConfigContent()), 0o600); err != nil {
 		b.Fatalf("Failed to write config file: %v", err)
 	}
 
 	b.ResetTimer()
 
 	for range b.N {
-		_, _ = config.Load(configPath)
+		_, err := config.Load(configPath)
+		if err != nil {
+			b.Errorf("config.Load() error = %v", err)
+		}
 	}
 }
