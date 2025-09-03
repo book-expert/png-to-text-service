@@ -11,6 +11,14 @@ import (
 	"github.com/nnikolov3/configurator"
 )
 
+var (
+	ErrInputDirRequired  = errors.New("paths.input_dir is required")
+	ErrOutputDirRequired = errors.New("paths.output_dir is required")
+	ErrAPIKeyRequired    = errors.New(
+		"gemini.api_key_variable is required when augmentation is enabled",
+	)
+)
+
 // Config represents the complete configuration for the PNG-to-text service.
 type Config struct {
 	Project struct {
@@ -87,11 +95,11 @@ func FindProjectRoot(startDir string) (string, string, error) {
 func (c *Config) validate() error {
 	// Validate required fields
 	if c.Paths.InputDir == "" {
-		return errors.New("paths.input_dir is required")
+		return ErrInputDirRequired
 	}
 
 	if c.Paths.OutputDir == "" {
-		return errors.New("paths.output_dir is required")
+		return ErrOutputDirRequired
 	}
 
 	// Set defaults for optional fields
@@ -132,9 +140,7 @@ func (c *Config) validate() error {
 	// Validate Gemini settings if augmentation is enabled
 	if c.Settings.EnableAugmentation {
 		if c.Gemini.APIKeyVariable == "" {
-			return errors.New(
-				"gemini.api_key_variable is required when augmentation is enabled",
-			)
+			return ErrAPIKeyRequired
 		}
 
 		if len(c.Gemini.Models) == 0 {

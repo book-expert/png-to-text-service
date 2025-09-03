@@ -18,6 +18,13 @@ import (
 	"github.com/nnikolov3/logger"
 )
 
+var (
+	ErrImagePathRequired = errors.New("image path is required")
+	ErrEmptyResponse     = errors.New("empty response")
+	ErrNoCandidates      = errors.New("no candidates in response")
+	ErrGeminiAPIError    = errors.New("Gemini API error")
+)
+
 // AugmentationType defines the type of augmentation to perform.
 type AugmentationType string
 
@@ -142,7 +149,7 @@ func (g *GeminiProcessor) AugmentText(
 // validateInputs checks that the required inputs are valid.
 func (g *GeminiProcessor) validateInputs(ocrText, imagePath string) error {
 	if imagePath == "" {
-		return errors.New("image path is required")
+		return ErrImagePathRequired
 	}
 
 	if _, err := os.Stat(imagePath); err != nil {
@@ -179,7 +186,6 @@ func (g *GeminiProcessor) detectImageMimeType(imagePath string) string {
 		return "image/png"
 	}
 }
-
 
 // buildPromptWithOptions constructs a prompt based on augmentation options.
 func (g *GeminiProcessor) buildPromptWithOptions(
@@ -296,7 +302,7 @@ func (g *GeminiProcessor) tryModelWithRetries(
 		}
 
 		if err == nil {
-			err = errors.New("empty response")
+			err = ErrEmptyResponse
 		}
 
 		lastErr = fmt.Errorf(
@@ -384,8 +390,10 @@ func (g *GeminiProcessor) callGeminiAPI(
 	if err != nil {
 		return "", fmt.Errorf("execute request: %w", err)
 	}
+
 	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
+		closeErr := resp.Body.Close()
+		if closeErr != nil {
 			g.logger.Warn("Failed to close response body: %v", closeErr)
 		}
 	}()
@@ -402,16 +410,18 @@ func (g *GeminiProcessor) callGeminiAPI(
 		if json.Unmarshal(respBytes, &apiErrResp) == nil &&
 			apiErrResp.Error != nil {
 			return "", fmt.Errorf(
-				"Gemini API error (HTTP %d): %s",
+				"HTTP %d: %s: %w",
 				resp.StatusCode,
 				apiErrResp.Error.Message,
+				ErrGeminiAPIError,
 			)
 		}
 
 		return "", fmt.Errorf(
-			"Gemini API error (HTTP %d): %s",
+			"HTTP %d: %s: %w",
 			resp.StatusCode,
 			strings.TrimSpace(string(respBytes)),
+			ErrGeminiAPIError,
 		)
 	}
 
@@ -423,12 +433,16 @@ func (g *GeminiProcessor) callGeminiAPI(
 
 	// Check for API errors in response
 	if geminiResp.Error != nil && geminiResp.Error.Message != "" {
-		return "", fmt.Errorf("Gemini API error: %s", geminiResp.Error.Message)
+		return "", fmt.Errorf(
+			"%s: %w",
+			geminiResp.Error.Message,
+			ErrGeminiAPIError,
+		)
 	}
 
 	// Extract text from candidates
 	if len(geminiResp.Candidates) == 0 {
-		return "", errors.New("no candidates in response")
+		return "", ErrNoCandidates
 	}
 
 	var textBuilder strings.Builder

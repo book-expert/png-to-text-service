@@ -3,6 +3,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,8 @@ import (
 	"github.com/nnikolov3/png-to-text-service/internal/config"
 	"github.com/nnikolov3/png-to-text-service/internal/ocr"
 )
+
+var ErrAPIKeyNotFound = errors.New("API key not found in environment variable")
 
 // OCRProcessor defines the interface for OCR processing.
 type OCRProcessor interface {
@@ -69,8 +72,9 @@ func NewPipeline(cfg *config.Config, logger *logger.Logger) (*Pipeline, error) {
 		apiKey := cfg.GetAPIKey()
 		if apiKey == "" {
 			return nil, fmt.Errorf(
-				"API key not found in environment variable %s",
+				"API key not found in environment variable %s: %w",
 				cfg.Gemini.APIKeyVariable,
+				ErrAPIKeyNotFound,
 			)
 		}
 
@@ -417,7 +421,11 @@ func (p *Pipeline) writeOutput(outputPath, text string) error {
 	}
 
 	// Write the file
-	err = os.WriteFile(outputPath, []byte(text), 0o644)
+	err = os.WriteFile(
+		outputPath,
+		[]byte(text),
+		0o644,
+	)
 	if err != nil {
 		return fmt.Errorf("write file: %w", err)
 	}

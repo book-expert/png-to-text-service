@@ -16,6 +16,13 @@ import (
 	"github.com/nnikolov3/logger"
 )
 
+var (
+	ErrInvalidExtension = errors.New("file must have .png extension")
+	ErrPathIsDirectory  = errors.New("path is a directory")
+	ErrFileEmpty        = errors.New("file is empty")
+	ErrOCRResultEmpty   = errors.New("empty OCR result")
+)
+
 // TesseractConfig holds configuration for Tesseract OCR.
 type TesseractConfig struct {
 	Language       string
@@ -52,7 +59,11 @@ func (p *Processor) ProcessPNG(ctx context.Context, pngPath string) (string, err
 
 	cleanedText := p.cleanOCRText(text)
 	if strings.TrimSpace(cleanedText) == "" {
-		return "", fmt.Errorf("empty OCR result for %s", pngPath)
+		return "", fmt.Errorf(
+			"empty OCR result for %s: %w",
+			pngPath,
+			ErrOCRResultEmpty,
+		)
 	}
 
 	return cleanedText, nil
@@ -61,7 +72,11 @@ func (p *Processor) ProcessPNG(ctx context.Context, pngPath string) (string, err
 // validateFile checks if the PNG file exists and is readable.
 func (p *Processor) validateFile(pngPath string) error {
 	if !strings.HasSuffix(strings.ToLower(pngPath), ".png") {
-		return fmt.Errorf("file must have .png extension: %s", pngPath)
+		return fmt.Errorf(
+			"file must have .png extension %s: %w",
+			pngPath,
+			ErrInvalidExtension,
+		)
 	}
 
 	info, err := os.Stat(pngPath)
@@ -70,11 +85,15 @@ func (p *Processor) validateFile(pngPath string) error {
 	}
 
 	if info.IsDir() {
-		return fmt.Errorf("path is a directory: %s", pngPath)
+		return fmt.Errorf(
+			"path is a directory %s: %w",
+			pngPath,
+			ErrPathIsDirectory,
+		)
 	}
 
 	if info.Size() == 0 {
-		return fmt.Errorf("file is empty: %s", pngPath)
+		return fmt.Errorf("file is empty %s: %w", pngPath, ErrFileEmpty)
 	}
 
 	return nil

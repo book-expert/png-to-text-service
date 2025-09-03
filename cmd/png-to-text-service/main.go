@@ -18,6 +18,8 @@ import (
 	"github.com/nnikolov3/png-to-text-service/internal/pipeline"
 )
 
+var ErrDirectoriesRequired = errors.New("input and output directories must be specified")
+
 func main() {
 	// Parse command line flags
 	var (
@@ -270,7 +272,7 @@ func processDirectory(
 	logger *logger.Logger,
 ) error {
 	if inputDir == "" || outputDir == "" {
-		return errors.New("input and output directories must be specified")
+		return ErrDirectoriesRequired
 	}
 
 	// Validate input directory exists
