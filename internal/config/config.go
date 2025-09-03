@@ -25,6 +25,11 @@ type Config struct {
 	Prompts struct {
 		Augmentation string `toml:"augmentation"`
 	} `toml:"prompts"`
+	Augmentation struct {
+		Type             string `toml:"type"`               // "commentary" or "summary"
+		CustomPrompt     string `toml:"custom_prompt"`      // Optional custom prompt override
+		UsePromptBuilder bool   `toml:"use_prompt_builder"` // Enable prompt-builder integration
+	} `toml:"augmentation"`
 	Logging struct {
 		Level                string `toml:"level"`
 		Dir                  string `toml:"dir"`
@@ -117,6 +122,11 @@ func (c *Config) validate() error {
 
 	if c.Tesseract.TimeoutSeconds <= 0 {
 		c.Tesseract.TimeoutSeconds = 120
+	}
+
+	// Set defaults for augmentation settings
+	if c.Augmentation.Type == "" {
+		c.Augmentation.Type = "commentary" // Default to commentary mode
 	}
 
 	// Validate Gemini settings if augmentation is enabled

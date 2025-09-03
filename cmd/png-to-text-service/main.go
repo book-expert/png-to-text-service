@@ -51,6 +51,16 @@ func main() {
 			false,
 			"Disable AI text augmentation",
 		)
+		promptFlag = flag.String(
+			"prompt",
+			"",
+			"Custom prompt for AI text augmentation (overrides config)",
+		)
+		augmentationTypeFlag = flag.String(
+			"augmentation-type",
+			"",
+			"Augmentation type: 'commentary' or 'summary' (overrides config)",
+		)
 		versionFlag = flag.Bool("version", false, "Print version and exit")
 	)
 	flag.Parse()
@@ -89,11 +99,14 @@ func main() {
 		*outputDirFlag,
 		*workersFlag,
 		*noAugmentFlag,
+		*promptFlag,
+		*augmentationTypeFlag,
 	)
 
 	// Ensure directories exist
-	if err := cfg.EnsureDirectories(); err != nil {
-		fatalf("Failed to ensure directories: %v", err)
+	dirErr := cfg.EnsureDirectories()
+	if dirErr != nil {
+		fatalf("Failed to ensure directories: %v", dirErr)
 	}
 
 	// Create pipeline
@@ -175,6 +188,7 @@ func applyCommandLineOverrides(
 	inputDir, outputDir string,
 	workers int,
 	noAugment bool,
+	customPrompt, augmentationType string,
 ) {
 	if inputDir != "" {
 		cfg.Paths.InputDir = inputDir
@@ -190,6 +204,19 @@ func applyCommandLineOverrides(
 
 	if noAugment {
 		cfg.Settings.EnableAugmentation = false
+	}
+
+	if customPrompt != "" {
+		cfg.Augmentation.CustomPrompt = customPrompt
+	}
+
+	if augmentationType != "" {
+		// Validate augmentation type
+		if augmentationType == "commentary" || augmentationType == "summary" {
+			cfg.Augmentation.Type = augmentationType
+		} else {
+			fatalf("Invalid augmentation type: %s. Must be 'commentary' or 'summary'", augmentationType)
+		}
 	}
 }
 

@@ -1,6 +1,6 @@
 module github.com/nnikolov3/png-to-text-service
 
-go 1.25
+go 1.25.0
 
 require (
 	github.com/nnikolov3/configurator v0.0.0

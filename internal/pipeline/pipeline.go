@@ -74,6 +74,18 @@ func NewPipeline(cfg *config.Config, logger *logger.Logger) (*Pipeline, error) {
 			)
 		}
 
+		// Convert augmentation type string to enum
+		var augmentationType augment.AugmentationType
+
+		switch cfg.Augmentation.Type {
+		case "commentary":
+			augmentationType = augment.AugmentationCommentary
+		case "summary":
+			augmentationType = augment.AugmentationSummary
+		default:
+			augmentationType = augment.AugmentationCommentary // Default
+		}
+
 		geminiConfig := augment.GeminiConfig{
 			APIKey:            apiKey,
 			Models:            cfg.Gemini.Models,
@@ -85,6 +97,9 @@ func NewPipeline(cfg *config.Config, logger *logger.Logger) (*Pipeline, error) {
 			TopP:              cfg.Gemini.TopP,
 			MaxTokens:         cfg.Gemini.MaxTokens,
 			PromptTemplate:    cfg.Prompts.Augmentation,
+			AugmentationType:  augmentationType,
+			CustomPrompt:      cfg.Augmentation.CustomPrompt,
+			UsePromptBuilder:  cfg.Augmentation.UsePromptBuilder,
 		}
 
 		textAugmenter = augment.NewGeminiProcessor(geminiConfig, logger)
@@ -130,8 +145,9 @@ func (p *Pipeline) ProcessDirectory(
 	p.logger.Info("Found %d PNG files to process", len(pngFiles))
 
 	// Ensure output directory exists
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
+	mkdirErr := os.MkdirAll(outputDir, 0o755)
+	if mkdirErr != nil {
+		return fmt.Errorf("create output directory: %w", mkdirErr)
 	}
 
 	// Process files in parallel
@@ -258,9 +274,13 @@ func (p *Pipeline) worker(
 		select {
 		case <-ctx.Done():
 			results <- ProcessingResult{
-				PNGPath: pngPath,
-				Success: false,
-				Error:   ctx.Err(),
+				ProcessedAt:   time.Time{},
+				Error:         ctx.Err(),
+				PNGPath:       pngPath,
+				OutputPath:    "",
+				OCRText:       "",
+				AugmentedText: "",
+				Success:       false,
 			}
 
 			return
@@ -271,9 +291,13 @@ func (p *Pipeline) worker(
 		relPath, err := filepath.Rel(inputDir, pngPath)
 		if err != nil {
 			results <- ProcessingResult{
-				PNGPath: pngPath,
-				Success: false,
-				Error:   fmt.Errorf("calculate relative path: %w", err),
+				ProcessedAt:   time.Time{},
+				Error:         fmt.Errorf("calculate relative path: %w", err),
+				PNGPath:       pngPath,
+				OutputPath:    "",
+				OCRText:       "",
+				AugmentedText: "",
+				Success:       false,
 			}
 
 			continue
@@ -287,9 +311,13 @@ func (p *Pipeline) worker(
 		result, err := p.processFile(ctx, pngPath, outputPath)
 		if err != nil {
 			results <- ProcessingResult{
-				PNGPath: pngPath,
-				Success: false,
-				Error:   err,
+				ProcessedAt:   time.Time{},
+				Error:         err,
+				PNGPath:       pngPath,
+				OutputPath:    "",
+				OCRText:       "",
+				AugmentedText: "",
+				Success:       false,
 			}
 
 			continue
@@ -305,9 +333,13 @@ func (p *Pipeline) processFile(
 	pngPath, outputPath string,
 ) (ProcessingResult, error) {
 	result := ProcessingResult{
-		PNGPath:     pngPath,
-		OutputPath:  outputPath,
-		ProcessedAt: time.Now(),
+		ProcessedAt:   time.Now(),
+		Error:         nil,
+		PNGPath:       pngPath,
+		OutputPath:    outputPath,
+		OCRText:       "",
+		AugmentedText: "",
+		Success:       false,
 	}
 
 	// Check if output already exists and we should skip

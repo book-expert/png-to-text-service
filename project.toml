@@ -61,3 +61,11 @@ enable_console_logging = true
 # ========================================================================
 [prompts]
 augmentation = """You are a PhD-level technical narrator. Integrate commentary derived from the page image into the OCR text, producing a coherent narration for text-to-speech. Maintain technical accuracy, describe figures/code/tables as natural prose inserted near the relevant context, avoid markdown, and output continuous paragraphs."""
+
+# ========================================================================
+# Augmentation Configuration
+# ========================================================================
+[augmentation]
+type = "commentary"  # Options: "commentary" (default), "summary"
+custom_prompt = ""   # Optional: Custom prompt to override type-specific defaults
+use_prompt_builder = true  # Enable prompt-builder library for dynamic prompt construction

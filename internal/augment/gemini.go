@@ -18,18 +18,39 @@ import (
 	"github.com/nnikolov3/logger"
 )
 
+// AugmentationType defines the type of augmentation to perform.
+type AugmentationType string
+
+const (
+	// AugmentationCommentary describes people, environment, etc. like movie
+	// accessibility features (default).
+	AugmentationCommentary AugmentationType = "commentary"
+	// AugmentationSummary adds a summary at the end of the page.
+	AugmentationSummary AugmentationType = "summary"
+)
+
+// AugmentationOptions contains options for text augmentation.
+type AugmentationOptions struct {
+	Parameters   map[string]any
+	Type         AugmentationType
+	CustomPrompt string
+}
+
 // GeminiConfig holds configuration for Gemini API interaction.
 type GeminiConfig struct {
 	APIKey            string
 	PromptTemplate    string
+	CustomPrompt      string
+	AugmentationType  AugmentationType
 	Models            []string
-	MaxRetries        int
-	RetryDelaySeconds int
-	TimeoutSeconds    int
 	Temperature       float64
+	TimeoutSeconds    int
 	TopK              int
 	TopP              float64
 	MaxTokens         int
+	RetryDelaySeconds int
+	MaxRetries        int
+	UsePromptBuilder  bool
 }
 
 // GeminiProcessor implements text augmentation using Google's Gemini API.
@@ -93,50 +114,29 @@ func NewGeminiProcessor(config GeminiConfig, logger *logger.Logger) *GeminiProce
 	return &GeminiProcessor{
 		config: config,
 		httpClient: &http.Client{
-			Timeout: time.Duration(config.TimeoutSeconds) * time.Second,
+			Transport:     nil,
+			CheckRedirect: nil,
+			Jar:           nil,
+			Timeout:       time.Duration(config.TimeoutSeconds) * time.Second,
 		},
 		logger: logger,
 	}
 }
 
 // AugmentText enhances OCR text using image context and AI models.
+// This method maintains backward compatibility by using default configuration options.
 func (g *GeminiProcessor) AugmentText(
 	ctx context.Context,
 	ocrText, imagePath string,
 ) (string, error) {
-	if err := g.validateInputs(ocrText, imagePath); err != nil {
-		return "", fmt.Errorf("validate inputs: %w", err)
+	// Use the new method with default options for backward compatibility
+	opts := &AugmentationOptions{
+		Type:         g.config.AugmentationType,
+		CustomPrompt: g.config.CustomPrompt,
+		Parameters:   nil,
 	}
 
-	// Read and encode the image
-	imageData, mimeType, err := g.readAndEncodeImage(imagePath)
-	if err != nil {
-		return "", fmt.Errorf("read image: %w", err)
-	}
-
-	// Build the prompt
-	prompt := g.buildPrompt(ocrText)
-
-	// Try models in order with retries
-	var lastErr error
-
-	for _, model := range g.config.Models {
-		result, err := g.tryModelWithRetries(
-			ctx,
-			model,
-			prompt,
-			imageData,
-			mimeType,
-		)
-		if err == nil && strings.TrimSpace(result) != "" {
-			return result, nil
-		}
-
-		lastErr = err
-		g.logger.Warn("Model %s failed: %v", model, err)
-	}
-
-	return "", fmt.Errorf("all models failed, last error: %w", lastErr)
+	return g.AugmentTextWithOptions(ctx, ocrText, imagePath, opts)
 }
 
 // validateInputs checks that the required inputs are valid.
@@ -180,17 +180,36 @@ func (g *GeminiProcessor) detectImageMimeType(imagePath string) string {
 	}
 }
 
-// buildPrompt constructs the full prompt including template and OCR text.
-func (g *GeminiProcessor) buildPrompt(ocrText string) string {
-	var builder strings.Builder
 
-	// Use configured prompt template or default
-	promptTemplate := g.config.PromptTemplate
-	if promptTemplate == "" {
-		promptTemplate = "You are a PhD-level technical narrator. Integrate commentary derived from the page image into the OCR text, producing a coherent narration for text-to-speech. Maintain technical accuracy, describe figures/code/tables as natural prose inserted near the relevant context, avoid markdown, and output continuous paragraphs."
+// buildPromptWithOptions constructs a prompt based on augmentation options.
+func (g *GeminiProcessor) buildPromptWithOptions(
+	ocrText string,
+	opts *AugmentationOptions,
+) (string, error) {
+	// If custom prompt is provided, use it directly
+	if opts != nil && opts.CustomPrompt != "" {
+		return g.buildCustomPrompt(ocrText, opts.CustomPrompt), nil
 	}
 
-	builder.WriteString(promptTemplate)
+	// If prompt builder is enabled, use enhanced prompt building
+	if g.config.UsePromptBuilder {
+		return g.buildPromptWithBuilder(ocrText, opts)
+	}
+
+	// Fall back to original prompt building logic with type-specific defaults
+	augmentationType := g.config.AugmentationType
+	if opts != nil && opts.Type != "" {
+		augmentationType = opts.Type
+	}
+
+	return g.buildPromptForType(ocrText, augmentationType), nil
+}
+
+// buildCustomPrompt constructs a prompt using a custom template.
+func (g *GeminiProcessor) buildCustomPrompt(ocrText, customPrompt string) string {
+	var builder strings.Builder
+
+	builder.WriteString(customPrompt)
 	builder.WriteString("\n\nOCR TEXT FOLLOWS:\n\n")
 
 	if strings.TrimSpace(ocrText) == "" {
@@ -202,6 +221,65 @@ func (g *GeminiProcessor) buildPrompt(ocrText string) string {
 	}
 
 	return builder.String()
+}
+
+// buildPromptWithBuilder constructs a prompt using a simple built-in template system.
+// Note: This is a simplified implementation. In the future, this could be enhanced
+// with a proper external prompt-builder library when it has a stable public API.
+func (g *GeminiProcessor) buildPromptWithBuilder(
+	ocrText string,
+	opts *AugmentationOptions,
+) (string, error) {
+	// Determine the augmentation type
+	augmentationType := g.config.AugmentationType
+	if opts != nil && opts.Type != "" {
+		augmentationType = opts.Type
+	}
+
+	// Use the simpler prompt building approach
+	return g.buildPromptForType(ocrText, augmentationType), nil
+}
+
+// buildPromptForType constructs a prompt for a specific augmentation type.
+func (g *GeminiProcessor) buildPromptForType(
+	ocrText string,
+	augmentationType AugmentationType,
+) string {
+	var (
+		builder        strings.Builder
+		promptTemplate string
+	)
+
+	// Select prompt template based on type
+
+	switch augmentationType {
+	case AugmentationCommentary:
+		promptTemplate = getCommentaryPrompt()
+	case AugmentationSummary:
+		promptTemplate = getSummaryPrompt()
+	default:
+		// Use configured template or fall back to commentary
+		if g.config.PromptTemplate != "" {
+			promptTemplate = g.config.PromptTemplate
+		} else {
+			promptTemplate = getCommentaryPrompt()
+		}
+	}
+
+	builder.WriteString(promptTemplate)
+	builder.WriteString("\n\nOCR TEXT FOLLOWS:\n\n")
+	builder.WriteString(g.formatOCRText(ocrText))
+
+	return builder.String()
+}
+
+// formatOCRText formats OCR text for prompt inclusion.
+func (g *GeminiProcessor) formatOCRText(ocrText string) string {
+	if strings.TrimSpace(ocrText) == "" {
+		return "[This page contains little or no OCR text. Describe relevant content from the image in clear narration.]"
+	}
+
+	return ocrText
 }
 
 // tryModelWithRetries attempts to get a response from a specific model with retry logic.
@@ -260,12 +338,16 @@ func (g *GeminiProcessor) callGeminiAPI(
 			{
 				Role: "user",
 				Parts: []geminiPart{
-					{Text: prompt},
+					{
+						InlineData: nil,
+						Text:       prompt,
+					},
 					{
 						InlineData: &geminiInlineData{
 							MimeType: mimeType,
 							Data:     imageData,
 						},
+						Text: "",
 					},
 				},
 			},
@@ -302,7 +384,11 @@ func (g *GeminiProcessor) callGeminiAPI(
 	if err != nil {
 		return "", fmt.Errorf("execute request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			g.logger.Warn("Failed to close response body: %v", closeErr)
+		}
+	}()
 
 	// Read response
 	respBytes, err := io.ReadAll(resp.Body)
@@ -315,7 +401,6 @@ func (g *GeminiProcessor) callGeminiAPI(
 		var apiErrResp geminiResponse
 		if json.Unmarshal(respBytes, &apiErrResp) == nil &&
 			apiErrResp.Error != nil {
-
 			return "", fmt.Errorf(
 				"Gemini API error (HTTP %d): %s",
 				resp.StatusCode,
@@ -360,4 +445,59 @@ func (g *GeminiProcessor) callGeminiAPI(
 	}
 
 	return textBuilder.String(), nil
+}
+
+// getCommentaryPrompt returns the default commentary prompt.
+func getCommentaryPrompt() string {
+	return "You are a PhD-level technical narrator specializing in accessibility commentary. Integrate descriptive commentary derived from the page image into the OCR text, producing a coherent narration for text-to-speech. Focus on describing people, environment, figures, diagrams, and visual elements like movie accessibility features. Maintain technical accuracy, describe visual content as natural prose inserted near relevant context, avoid markdown formatting, and output continuous paragraphs."
+}
+
+// getSummaryPrompt returns the default summary prompt.
+func getSummaryPrompt() string {
+	return "You are a PhD-level technical summarizer. Enhance the OCR text by adding a comprehensive summary at the end of the content. The summary should capture key points, main concepts, and important details from both the OCR text and visual elements in the image. Maintain technical accuracy, avoid markdown formatting, and structure the output as: [original OCR text] followed by [SUMMARY: comprehensive summary paragraph]."
+}
+
+// AugmentTextWithOptions enhances OCR text using image context and AI models with
+// specific options.
+func (g *GeminiProcessor) AugmentTextWithOptions(
+	ctx context.Context,
+	ocrText, imagePath string,
+	opts *AugmentationOptions,
+) (string, error) {
+	if err := g.validateInputs(ocrText, imagePath); err != nil {
+		return "", fmt.Errorf("validate inputs: %w", err)
+	}
+
+	// Read and encode the image
+	imageData, mimeType, err := g.readAndEncodeImage(imagePath)
+	if err != nil {
+		return "", fmt.Errorf("read image: %w", err)
+	}
+
+	// Build the prompt based on options
+	prompt, err := g.buildPromptWithOptions(ocrText, opts)
+	if err != nil {
+		return "", fmt.Errorf("build prompt: %w", err)
+	}
+
+	// Try models in order with retries
+	var lastErr error
+
+	for _, model := range g.config.Models {
+		result, err := g.tryModelWithRetries(
+			ctx,
+			model,
+			prompt,
+			imageData,
+			mimeType,
+		)
+		if err == nil && strings.TrimSpace(result) != "" {
+			return result, nil
+		}
+
+		lastErr = err
+		g.logger.Warn("Model %s failed: %v", model, err)
+	}
+
+	return "", fmt.Errorf("all models failed, last error: %w", lastErr)
 }

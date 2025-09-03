@@ -28,7 +28,7 @@ func NewCleaner() *Cleaner {
 
 		// Remove tokens like Preprint / preprints with optional trailing
 		// apostrophes
-		rePreprintToken: regexp.MustCompile(`(?i)\bpreprints?\b['']*`),
+		rePreprintToken: regexp.MustCompile(`(?i)\bpreprints?\b'*`),
 
 		// Remove diacritic detection notices
 		reDetectedDiacriticsToken: regexp.MustCompile(
