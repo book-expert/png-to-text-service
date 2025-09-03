@@ -1,0 +1,63 @@
+# ========================================================================
+# PNG-TO-TEXT-SERVICE CONFIGURATION
+# Unified PNG → OCR → AI Augmentation Pipeline
+# ========================================================================
+[project]
+name = "png-to-text-service"
+version = "1.0.0"
+description = "Unified PNG-to-text service with OCR and AI augmentation"
+
+# ========================================================================
+# Paths and Directories
+# ========================================================================
+[paths]
+input_dir = "./input"
+output_dir = "./output"
+
+# ========================================================================
+# Processing Settings
+# ========================================================================
+[settings]
+workers = 8
+timeout_seconds = 300
+enable_augmentation = true
+skip_existing = true
+
+# ========================================================================
+# Tesseract OCR Configuration
+# ========================================================================
+[tesseract]
+language = "eng+equ"
+oem = 3  # auto (LSTM + legacy fallback for compatibility)
+psm = 3  # fully automatic page segmentation (no OSD, more robust)
+dpi = 300
+timeout_seconds = 120
+
+# ========================================================================
+# Gemini AI Configuration
+# ========================================================================
+[gemini]
+api_key_variable = "GEMINI_API_KEY"
+models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"]
+max_retries = 3
+retry_delay_seconds = 30
+timeout_seconds = 120
+temperature = 0.1
+top_k = 40
+top_p = 0.95
+max_tokens = 8192
+
+# ========================================================================
+# Logging Configuration
+# ========================================================================
+[logging]
+level = "info"
+dir = "./logs"
+enable_file_logging = true
+enable_console_logging = true
+
+# ========================================================================
+# Prompts
+# ========================================================================
+[prompts]
+augmentation = """You are a PhD-level technical narrator. Integrate commentary derived from the page image into the OCR text, producing a coherent narration for text-to-speech. Maintain technical accuracy, describe figures/code/tables as natural prose inserted near the relevant context, avoid markdown, and output continuous paragraphs."""
