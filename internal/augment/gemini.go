@@ -293,37 +293,79 @@ func (g *GeminiProcessor) tryModelWithRetries(
 	ctx context.Context,
 	model, prompt, imageData, mimeType string,
 ) (string, error) {
-	var lastErr error
-
 	for attempt := 1; attempt <= g.config.MaxRetries; attempt++ {
-		result, err := g.callGeminiAPI(ctx, model, prompt, imageData, mimeType)
-		if err == nil && strings.TrimSpace(result) != "" {
+		result, err := g.attemptAPICall(
+			ctx,
+			model,
+			prompt,
+			imageData,
+			mimeType,
+			attempt,
+		)
+		if result != "" {
 			return result, nil
 		}
 
-		if err == nil {
-			err = ErrEmptyResponse
-		}
-
-		lastErr = fmt.Errorf(
-			"model %s attempt %d/%d: %w",
-			model,
-			attempt,
-			g.config.MaxRetries,
-			err,
-		)
-
-		// Wait before retry (except on last attempt)
-		if attempt < g.config.MaxRetries {
-			select {
-			case <-ctx.Done():
-				return "", ctx.Err()
-			case <-time.After(time.Duration(g.config.RetryDelaySeconds) * time.Second):
-			}
+		if err != nil {
+			return "", err
 		}
 	}
 
-	return "", lastErr
+	return "", fmt.Errorf("model %s: max retries exceeded", model)
+}
+
+// attemptAPICall makes a single API attempt and handles retry logic.
+func (g *GeminiProcessor) attemptAPICall(
+	ctx context.Context,
+	model, prompt, imageData, mimeType string,
+	attempt int,
+) (string, error) {
+	result, err := g.callGeminiAPI(ctx, model, prompt, imageData, mimeType)
+
+	if g.isSuccessfulResult(result, err) {
+		return result, nil
+	}
+
+	if attempt == g.config.MaxRetries {
+		return "", g.buildRetryError(model, attempt, err)
+	}
+
+	waitErr := g.waitBeforeRetry(ctx)
+	if waitErr != nil {
+		return "", waitErr
+	}
+
+	return "", nil
+}
+
+// isSuccessfulResult checks if the API call was successful and returned valid content.
+func (g *GeminiProcessor) isSuccessfulResult(result string, err error) bool {
+	return err == nil && strings.TrimSpace(result) != ""
+}
+
+// buildRetryError creates an error message for retry attempts.
+func (g *GeminiProcessor) buildRetryError(model string, attempt int, err error) error {
+	if err == nil {
+		err = ErrEmptyResponse
+	}
+
+	return fmt.Errorf(
+		"model %s attempt %d/%d: %w",
+		model,
+		attempt,
+		g.config.MaxRetries,
+		err,
+	)
+}
+
+// waitBeforeRetry waits for the configured delay before the next retry.
+func (g *GeminiProcessor) waitBeforeRetry(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(time.Duration(g.config.RetryDelaySeconds) * time.Second):
+		return nil
+	}
 }
 
 // callGeminiAPI makes a single API call to Gemini.
@@ -331,29 +373,61 @@ func (g *GeminiProcessor) callGeminiAPI(
 	ctx context.Context,
 	model, prompt, imageData, mimeType string,
 ) (string, error) {
-	// Build API URL
-	url := fmt.Sprintf(
+	url := g.buildAPIURL(model)
+	reqBody := g.buildRequestBody(prompt, imageData, mimeType)
+
+	req, err := g.createHTTPRequest(ctx, url, reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := g.executeRequest(req)
+	if err != nil {
+		return "", err
+	}
+	defer g.closeResponse(resp)
+
+	respBytes, err := g.readResponseBody(resp)
+	if err != nil {
+		return "", err
+	}
+
+	if err := g.checkHTTPError(resp.StatusCode, respBytes); err != nil {
+		return "", err
+	}
+
+	geminiResp, err := g.parseResponse(respBytes)
+	if err != nil {
+		return "", err
+	}
+
+	return g.extractTextFromResponse(geminiResp)
+}
+
+// buildAPIURL constructs the Gemini API URL.
+func (g *GeminiProcessor) buildAPIURL(model string) string {
+	return fmt.Sprintf(
 		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
 		model,
 		g.config.APIKey,
 	)
+}
 
-	// Build request body
-	reqBody := geminiRequest{
+// buildRequestBody creates the request body for the Gemini API.
+func (g *GeminiProcessor) buildRequestBody(
+	prompt, imageData, mimeType string,
+) geminiRequest {
+	return geminiRequest{
 		Contents: []geminiContent{
 			{
 				Role: "user",
 				Parts: []geminiPart{
-					{
-						InlineData: nil,
-						Text:       prompt,
-					},
+					{Text: prompt},
 					{
 						InlineData: &geminiInlineData{
 							MimeType: mimeType,
 							Data:     imageData,
 						},
-						Text: "",
 					},
 				},
 			},
@@ -365,14 +439,19 @@ func (g *GeminiProcessor) callGeminiAPI(
 			MaxOutputTokens: g.config.MaxTokens,
 		},
 	}
+}
 
-	// Marshal request to JSON
+// createHTTPRequest creates and configures the HTTP request.
+func (g *GeminiProcessor) createHTTPRequest(
+	ctx context.Context,
+	url string,
+	reqBody geminiRequest,
+) (*http.Request, error) {
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
+		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	// Create HTTP request
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
@@ -380,85 +459,122 @@ func (g *GeminiProcessor) callGeminiAPI(
 		bytes.NewReader(jsonData),
 	)
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
-	// Execute request
+	return req, nil
+}
+
+// executeRequest performs the HTTP request.
+func (g *GeminiProcessor) executeRequest(req *http.Request) (*http.Response, error) {
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("execute request: %w", err)
+		return nil, fmt.Errorf("execute request: %w", err)
 	}
 
-	defer func() {
-		closeErr := resp.Body.Close()
-		if closeErr != nil {
-			g.logger.Warn("Failed to close response body: %v", closeErr)
-		}
-	}()
+	return resp, nil
+}
 
-	// Read response
+// closeResponse safely closes the response body.
+func (g *GeminiProcessor) closeResponse(resp *http.Response) {
+	closeErr := resp.Body.Close()
+	if closeErr != nil {
+		g.logger.Warn("Failed to close response body: %v", closeErr)
+	}
+}
+
+// readResponseBody reads the response body content.
+func (g *GeminiProcessor) readResponseBody(resp *http.Response) ([]byte, error) {
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("read response: %w", err)
+		return nil, fmt.Errorf("read response: %w", err)
 	}
 
-	// Handle HTTP errors
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var apiErrResp geminiResponse
-		if json.Unmarshal(respBytes, &apiErrResp) == nil &&
-			apiErrResp.Error != nil {
-			return "", fmt.Errorf(
-				"HTTP %d: %s: %w",
-				resp.StatusCode,
-				apiErrResp.Error.Message,
-				ErrGeminiAPIError,
-			)
-		}
+	return respBytes, nil
+}
 
-		return "", fmt.Errorf(
+// checkHTTPError handles HTTP error responses.
+func (g *GeminiProcessor) checkHTTPError(statusCode int, respBytes []byte) error {
+	if statusCode >= 200 && statusCode < 300 {
+		return nil
+	}
+
+	var apiErrResp geminiResponse
+	if json.Unmarshal(respBytes, &apiErrResp) == nil && apiErrResp.Error != nil {
+		return fmt.Errorf(
 			"HTTP %d: %s: %w",
-			resp.StatusCode,
-			strings.TrimSpace(string(respBytes)),
+			statusCode,
+			apiErrResp.Error.Message,
 			ErrGeminiAPIError,
 		)
 	}
 
-	// Parse response
+	return fmt.Errorf(
+		"HTTP %d: %s: %w",
+		statusCode,
+		strings.TrimSpace(string(respBytes)),
+		ErrGeminiAPIError,
+	)
+}
+
+// parseResponse parses the JSON response from Gemini API.
+func (g *GeminiProcessor) parseResponse(respBytes []byte) (geminiResponse, error) {
 	var geminiResp geminiResponse
-	if err := json.Unmarshal(respBytes, &geminiResp); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
+
+	err := json.Unmarshal(respBytes, &geminiResp)
+	if err != nil {
+		return geminiResp, fmt.Errorf("unmarshal response: %w", err)
 	}
 
-	// Check for API errors in response
 	if geminiResp.Error != nil && geminiResp.Error.Message != "" {
-		return "", fmt.Errorf(
+		return geminiResp, fmt.Errorf(
 			"%s: %w",
 			geminiResp.Error.Message,
 			ErrGeminiAPIError,
 		)
 	}
 
-	// Extract text from candidates
+	return geminiResp, nil
+}
+
+// extractTextFromResponse extracts text content from the API response.
+func (g *GeminiProcessor) extractTextFromResponse(
+	geminiResp geminiResponse,
+) (string, error) {
 	if len(geminiResp.Candidates) == 0 {
 		return "", ErrNoCandidates
 	}
 
+	return g.buildTextFromParts(geminiResp.Candidates[0].Content.Parts), nil
+}
+
+// buildTextFromParts combines text parts into a single string.
+func (g *GeminiProcessor) buildTextFromParts(parts []geminiCandidateContentPart) string {
 	var textBuilder strings.Builder
-	for _, part := range geminiResp.Candidates[0].Content.Parts {
-		if strings.TrimSpace(part.Text) == "" {
-			continue
-		}
 
-		if textBuilder.Len() > 0 {
-			textBuilder.WriteByte('\n')
+	for _, part := range parts {
+		if g.isValidTextPart(part) {
+			g.appendTextPart(&textBuilder, part.Text)
 		}
-
-		textBuilder.WriteString(part.Text)
 	}
 
-	return textBuilder.String(), nil
+	return textBuilder.String()
+}
+
+// isValidTextPart checks if a text part contains valid content.
+func (g *GeminiProcessor) isValidTextPart(part geminiCandidateContentPart) bool {
+	return strings.TrimSpace(part.Text) != ""
+}
+
+// appendTextPart adds a text part to the builder with proper formatting.
+func (g *GeminiProcessor) appendTextPart(builder *strings.Builder, text string) {
+	if builder.Len() > 0 {
+		builder.WriteByte('\n')
+	}
+
+	builder.WriteString(text)
 }
 
 // getCommentaryPrompt returns the default commentary prompt.
@@ -482,19 +598,34 @@ func (g *GeminiProcessor) AugmentTextWithOptions(
 		return "", fmt.Errorf("validate inputs: %w", err)
 	}
 
-	// Read and encode the image
-	imageData, mimeType, err := g.readAndEncodeImage(imagePath)
+	imageData, mimeType, err := g.prepareImageData(imagePath)
 	if err != nil {
-		return "", fmt.Errorf("read image: %w", err)
+		return "", err
 	}
 
-	// Build the prompt based on options
 	prompt, err := g.buildPromptWithOptions(ocrText, opts)
 	if err != nil {
 		return "", fmt.Errorf("build prompt: %w", err)
 	}
 
-	// Try models in order with retries
+	return g.tryAllModels(ctx, prompt, imageData, mimeType)
+}
+
+// prepareImageData reads and encodes the image for API consumption.
+func (g *GeminiProcessor) prepareImageData(imagePath string) (string, string, error) {
+	imageData, mimeType, err := g.readAndEncodeImage(imagePath)
+	if err != nil {
+		return "", "", fmt.Errorf("read image: %w", err)
+	}
+
+	return imageData, mimeType, nil
+}
+
+// tryAllModels attempts to get a response from all configured models in order.
+func (g *GeminiProcessor) tryAllModels(
+	ctx context.Context,
+	prompt, imageData, mimeType string,
+) (string, error) {
 	var lastErr error
 
 	for _, model := range g.config.Models {
@@ -505,7 +636,8 @@ func (g *GeminiProcessor) AugmentTextWithOptions(
 			imageData,
 			mimeType,
 		)
-		if err == nil && strings.TrimSpace(result) != "" {
+
+		if g.isSuccessfulResult(result, err) {
 			return result, nil
 		}
 

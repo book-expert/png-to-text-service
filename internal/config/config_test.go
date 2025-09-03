@@ -77,21 +77,22 @@ func (h *envTestHelper) withEnvVar(key, value string, testFunc func()) {
 		h.t.Fatalf("Failed to set env var: %v", err)
 	}
 
-	defer func() {
-		if oldVal == "" {
-			err := os.Unsetenv(key)
-			if err != nil {
-				h.t.Logf("Failed to unset env var: %v", err)
-			}
-		} else {
-			err := os.Setenv(key, oldVal)
-			if err != nil {
-				h.t.Logf("Failed to restore env var: %v", err)
-			}
-		}
-	}()
+	defer h.restoreEnvVar(key, oldVal)
 
 	testFunc()
+}
+
+func (h *envTestHelper) restoreEnvVar(key, oldVal string) {
+	var err error
+	if oldVal == "" {
+		err = os.Unsetenv(key)
+	} else {
+		err = os.Setenv(key, oldVal)
+	}
+
+	if err != nil {
+		h.t.Logf("Failed to restore env var: %v", err)
+	}
 }
 
 // configTestCase represents a test case for config loading.
@@ -235,7 +236,36 @@ func TestConfig_Load(t *testing.T) {
 	tests := []configTestCase{
 		newConfigTestCase(
 			"valid config with all settings",
+			createValidConfigWithAllSettings(),
+			false,
+			validateCompleteConfig,
+		),
+		newConfigTestCase(
+			"missing required paths",
 			`[project]
+name = "test-service"`,
+			true,
+			nil,
+		),
+		newConfigTestCase(
+			"invalid TOML",
+			`[project
+name = "invalid"`,
+			true,
+			nil,
+		),
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			testCase.runConfigLoadTest(t)
+		})
+	}
+}
+
+func createValidConfigWithAllSettings() string {
+	return `[project]
 name = "test-service"
 version = "1.0.0"
 
@@ -260,53 +290,22 @@ models = ["gemini-2.5-flash-lite"]
 [logging]
 level = "info"
 dir = "./logs"
-`,
-			false,
-			func(t *testing.T, cfg *config.Config) {
-				t.Helper()
+`
+}
 
-				if cfg.Project.Name != "test-service" {
-					t.Errorf(
-						"Project.Name = %s, want test-service",
-						cfg.Project.Name,
-					)
-				}
+func validateCompleteConfig(t *testing.T, cfg *config.Config) {
+	t.Helper()
 
-				if cfg.Settings.Workers != 8 {
-					t.Errorf(
-						"Settings.Workers = %d, want 8",
-						cfg.Settings.Workers,
-					)
-				}
-
-				if !cfg.Settings.EnableAugmentation {
-					t.Error(
-						"Settings.EnableAugmentation = false, want true",
-					)
-				}
-			},
-		),
-		newConfigTestCase(
-			"missing required paths",
-			`[project]
-name = "test-service"`,
-			true,
-			nil,
-		),
-		newConfigTestCase(
-			"invalid TOML",
-			`[project
-name = "invalid"`,
-			true,
-			nil,
-		),
+	if cfg.Project.Name != "test-service" {
+		t.Errorf("Project.Name = %s, want test-service", cfg.Project.Name)
 	}
 
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			testCase.runConfigLoadTest(t)
-		})
+	if cfg.Settings.Workers != 8 {
+		t.Errorf("Settings.Workers = %d, want 8", cfg.Settings.Workers)
+	}
+
+	if !cfg.Settings.EnableAugmentation {
+		t.Error("Settings.EnableAugmentation = false, want true")
 	}
 }
 
@@ -367,28 +366,61 @@ func TestConfig_GetAPIKey(t *testing.T) {
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
-
-			if testCase.envKey != "" && testCase.envVal != "" {
-				envHelper := newEnvTestHelper(t)
-				envHelper.withEnvVar(
-					testCase.envKey,
-					testCase.envVal,
-					func() {
-						if got := testCase.config.GetAPIKey(); got != testCase.want {
-							t.Errorf(
-								"Config.GetAPIKey() = %v, want %v",
-								got,
-								testCase.want,
-							)
-						}
-					},
-				)
-			} else {
-				if got := testCase.config.GetAPIKey(); got != testCase.want {
-					t.Errorf("Config.GetAPIKey() = %v, want %v", got, testCase.want)
-				}
-			}
+			runGetAPIKeyTest(t, testCase)
 		})
+	}
+}
+
+func runGetAPIKeyTest(t *testing.T, testCase struct {
+	name   string
+	envKey string
+	envVal string
+	want   string
+	config config.Config
+},
+) {
+	t.Helper()
+
+	if testCase.envKey != "" && testCase.envVal != "" {
+		runGetAPIKeyTestWithEnv(t, testCase)
+	} else {
+		runGetAPIKeyTestDirect(t, testCase)
+	}
+}
+
+func runGetAPIKeyTestWithEnv(t *testing.T, testCase struct {
+	name   string
+	envKey string
+	envVal string
+	want   string
+	config config.Config
+},
+) {
+	t.Helper()
+
+	envHelper := newEnvTestHelper(t)
+	envHelper.withEnvVar(testCase.envKey, testCase.envVal, func() {
+		assertGetAPIKeyResult(t, testCase.config, testCase.want)
+	})
+}
+
+func runGetAPIKeyTestDirect(t *testing.T, testCase struct {
+	name   string
+	envKey string
+	envVal string
+	want   string
+	config config.Config
+},
+) {
+	t.Helper()
+	assertGetAPIKeyResult(t, testCase.config, testCase.want)
+}
+
+func assertGetAPIKeyResult(t *testing.T, cfg config.Config, want string) {
+	t.Helper()
+
+	if got := cfg.GetAPIKey(); got != want {
+		t.Errorf("Config.GetAPIKey() = %v, want %v", got, want)
 	}
 }
 
@@ -432,29 +464,41 @@ func TestConfig_GetLogFilePath(t *testing.T) {
 }
 
 func BenchmarkConfig_Load(b *testing.B) {
+	configPath := setupBenchmarkConfigFile(b)
+	defer cleanupBenchmarkConfigFile(b, configPath)
+
+	b.ResetTimer()
+
+	for range b.N {
+		if _, err := config.Load(configPath); err != nil {
+			b.Errorf("config.Load() error = %v", err)
+		}
+	}
+}
+
+func setupBenchmarkConfigFile(b *testing.B) string {
+	b.Helper()
+
 	tmpDir, err := os.MkdirTemp("", "config-bench")
 	if err != nil {
 		b.Fatalf("Failed to create temp dir: %v", err)
 	}
-
-	defer func() {
-		removeErr := os.RemoveAll(tmpDir)
-		if removeErr != nil {
-			b.Logf("Failed to remove temp dir: %v", removeErr)
-		}
-	}()
 
 	configPath := filepath.Join(tmpDir, "project.toml")
 	if err := os.WriteFile(configPath, []byte(createValidConfigContent()), 0o600); err != nil {
 		b.Fatalf("Failed to write config file: %v", err)
 	}
 
-	b.ResetTimer()
+	return configPath
+}
 
-	for range b.N {
-		_, err := config.Load(configPath)
-		if err != nil {
-			b.Errorf("config.Load() error = %v", err)
-		}
+func cleanupBenchmarkConfigFile(b *testing.B, configPath string) {
+	b.Helper()
+
+	tmpDir := filepath.Dir(configPath)
+
+	err := os.RemoveAll(tmpDir)
+	if err != nil {
+		b.Logf("Failed to remove temp dir: %v", err)
 	}
 }

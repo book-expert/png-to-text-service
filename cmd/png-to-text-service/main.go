@@ -21,115 +21,175 @@ import (
 var ErrDirectoriesRequired = errors.New("input and output directories must be specified")
 
 func main() {
-	// Parse command line flags
-	var (
-		configPathFlag = flag.String(
-			"config",
-			"",
-			"Path to configuration file (default: find project.toml)",
-		)
-		inputDirFlag = flag.String(
-			"input",
-			"",
-			"Input directory containing PNG files (overrides config)",
-		)
-		outputDirFlag = flag.String(
-			"output",
-			"",
-			"Output directory for text files (overrides config)",
-		)
-		singleFileFlag = flag.String(
-			"file",
-			"",
-			"Process single PNG file instead of directory",
-		)
-		workersFlag = flag.Int(
-			"workers",
-			0,
-			"Number of worker goroutines (overrides config)",
-		)
-		noAugmentFlag = flag.Bool(
-			"no-augment",
-			false,
-			"Disable AI text augmentation",
-		)
-		promptFlag = flag.String(
-			"prompt",
-			"",
-			"Custom prompt for AI text augmentation (overrides config)",
-		)
-		augmentationTypeFlag = flag.String(
-			"augmentation-type",
-			"",
-			"Augmentation type: 'commentary' or 'summary' (overrides config)",
-		)
-		versionFlag = flag.Bool("version", false, "Print version and exit")
-	)
-	flag.Parse()
+	flags := parseCommandLineFlags()
 
-	// Handle version flag
-	if *versionFlag {
-		fmt.Println("png-to-text-service version 1.0.0")
-		os.Exit(0)
+	if flags.versionFlag {
+		printVersionAndExit()
 	}
 
-	// Load configuration
-	cfg, err := loadConfiguration(*configPathFlag)
+	cfg, loggerInstance := initializeApplication(flags.configPathFlag)
+	defer closeLogger(loggerInstance)
+
+	applyCommandLineOverrides(
+		cfg,
+		flags.inputDirFlag,
+		flags.outputDirFlag,
+		flags.workersFlag,
+		flags.noAugmentFlag,
+		flags.promptFlag,
+		flags.augmentationTypeFlag,
+	)
+
+	ctx := setupApplicationContext(loggerInstance)
+	processingPipeline := createPipeline(cfg, loggerInstance)
+
+	runProcessing(ctx, processingPipeline, cfg, flags.singleFileFlag, loggerInstance)
+}
+
+// commandLineFlags holds all command line flag values.
+type commandLineFlags struct {
+	configPathFlag       string
+	inputDirFlag         string
+	outputDirFlag        string
+	singleFileFlag       string
+	promptFlag           string
+	augmentationTypeFlag string
+	workersFlag          int
+	noAugmentFlag        bool
+	versionFlag          bool
+}
+
+// parseCommandLineFlags parses and returns command line flags.
+func parseCommandLineFlags() commandLineFlags {
+	var flags commandLineFlags
+
+	flag.StringVar(
+		&flags.configPathFlag,
+		"config",
+		"",
+		"Path to configuration file (default: find project.toml)",
+	)
+	flag.StringVar(
+		&flags.inputDirFlag,
+		"input",
+		"",
+		"Input directory containing PNG files (overrides config)",
+	)
+	flag.StringVar(
+		&flags.outputDirFlag,
+		"output",
+		"",
+		"Output directory for text files (overrides config)",
+	)
+	flag.StringVar(
+		&flags.singleFileFlag,
+		"file",
+		"",
+		"Process single PNG file instead of directory",
+	)
+	flag.IntVar(
+		&flags.workersFlag,
+		"workers",
+		0,
+		"Number of worker goroutines (overrides config)",
+	)
+	flag.BoolVar(
+		&flags.noAugmentFlag,
+		"no-augment",
+		false,
+		"Disable AI text augmentation",
+	)
+	flag.StringVar(
+		&flags.promptFlag,
+		"prompt",
+		"",
+		"Custom prompt for AI text augmentation (overrides config)",
+	)
+	flag.StringVar(
+		&flags.augmentationTypeFlag,
+		"augmentation-type",
+		"",
+		"Augmentation type: 'commentary' or 'summary' (overrides config)",
+	)
+	flag.BoolVar(&flags.versionFlag, "version", false, "Print version and exit")
+
+	flag.Parse()
+
+	return flags
+}
+
+// printVersionAndExit prints version information and exits.
+func printVersionAndExit() {
+	fmt.Println("png-to-text-service version 1.0.0")
+	os.Exit(0)
+}
+
+// initializeApplication loads config and initializes logger.
+func initializeApplication(configPath string) (*config.Config, *logger.Logger) {
+	cfg, err := loadConfiguration(configPath)
 	if err != nil {
 		fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Initialize logger
 	loggerInstance, err := initializeLogger(cfg)
 	if err != nil {
 		fatalf("Failed to initialize logger: %v", err)
 	}
 
-	defer func() {
-		closeErr := loggerInstance.Close()
-		if closeErr != nil {
-			fmt.Fprintf(os.Stderr, "Failed to close logger: %v\n", closeErr)
-		}
-	}()
-
 	loggerInstance.Info("PNG-to-text-service starting up - version 1.0.0")
 
-	// Apply command line overrides
-	applyCommandLineOverrides(
-		cfg,
-		*inputDirFlag,
-		*outputDirFlag,
-		*workersFlag,
-		*noAugmentFlag,
-		*promptFlag,
-		*augmentationTypeFlag,
-	)
+	return cfg, loggerInstance
+}
 
-	// Ensure directories exist
+// closeLogger safely closes the logger instance.
+func closeLogger(loggerInstance *logger.Logger) {
+	closeErr := loggerInstance.Close()
+	if closeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to close logger: %v\n", closeErr)
+	}
+}
+
+// setupApplicationContext creates context and signal handling.
+func setupApplicationContext(loggerInstance *logger.Logger) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	setupSignalHandling(cancel, loggerInstance)
+
+	return ctx
+}
+
+// createPipeline creates and configures the processing pipeline.
+func createPipeline(
+	cfg *config.Config,
+	loggerInstance *logger.Logger,
+) *pipeline.Pipeline {
 	dirErr := cfg.EnsureDirectories()
 	if dirErr != nil {
 		fatalf("Failed to ensure directories: %v", dirErr)
 	}
 
-	// Create pipeline
 	processingPipeline, err := pipeline.NewPipeline(cfg, loggerInstance)
 	if err != nil {
 		fatalf("Failed to create pipeline: %v", err)
 	}
 
-	// Set up context with cancellation for graceful shutdown
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	return processingPipeline
+}
 
-	// Set up signal handling for graceful shutdown
-	setupSignalHandling(cancel, loggerInstance)
+// runProcessing executes the main processing logic.
+func runProcessing(
+	ctx context.Context,
+	processingPipeline *pipeline.Pipeline,
+	cfg *config.Config,
+	singleFile string,
+	loggerInstance *logger.Logger,
+) {
+	var err error
 
-	// Process files
-	if *singleFileFlag != "" {
+	if singleFile != "" {
 		err = processSingleFile(
 			ctx,
 			processingPipeline,
-			*singleFileFlag,
+			singleFile,
 			cfg.Paths.OutputDir,
 			loggerInstance,
 		)
@@ -148,25 +208,40 @@ func main() {
 // loadConfiguration loads the configuration from the specified path or finds it
 // automatically.
 func loadConfiguration(configPath string) (*config.Config, error) {
-	if configPath == "" {
-		// Find configuration automatically
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, fmt.Errorf("get working directory: %w", err)
-		}
-
-		_, configPath, err = config.FindProjectRoot(wd)
-		if err != nil {
-			return nil, fmt.Errorf("find project configuration: %w", err)
-		}
+	finalConfigPath, err := resolveConfigPath(configPath)
+	if err != nil {
+		return nil, err
 	}
 
-	cfg, err := config.Load(configPath)
+	cfg, err := config.Load(finalConfigPath)
 	if err != nil {
-		return nil, fmt.Errorf("load configuration from %s: %w", configPath, err)
+		return nil, fmt.Errorf(
+			"load configuration from %s: %w",
+			finalConfigPath,
+			err,
+		)
 	}
 
 	return cfg, nil
+}
+
+// resolveConfigPath determines the final configuration file path.
+func resolveConfigPath(configPath string) (string, error) {
+	if configPath != "" {
+		return configPath, nil
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get working directory: %w", err)
+	}
+
+	_, foundConfigPath, err := config.FindProjectRoot(wd)
+	if err != nil {
+		return "", fmt.Errorf("find project configuration: %w", err)
+	}
+
+	return foundConfigPath, nil
 }
 
 // initializeLogger creates and configures the logger instance.
@@ -192,6 +267,13 @@ func applyCommandLineOverrides(
 	noAugment bool,
 	customPrompt, augmentationType string,
 ) {
+	applyPathOverrides(cfg, inputDir, outputDir)
+	applySettingsOverrides(cfg, workers, noAugment)
+	applyAugmentationOverrides(cfg, customPrompt, augmentationType)
+}
+
+// applyPathOverrides applies path-related command line overrides.
+func applyPathOverrides(cfg *config.Config, inputDir, outputDir string) {
 	if inputDir != "" {
 		cfg.Paths.InputDir = inputDir
 	}
@@ -199,7 +281,10 @@ func applyCommandLineOverrides(
 	if outputDir != "" {
 		cfg.Paths.OutputDir = outputDir
 	}
+}
 
+// applySettingsOverrides applies settings-related command line overrides.
+func applySettingsOverrides(cfg *config.Config, workers int, noAugment bool) {
 	if workers > 0 {
 		cfg.Settings.Workers = workers
 	}
@@ -207,18 +292,28 @@ func applyCommandLineOverrides(
 	if noAugment {
 		cfg.Settings.EnableAugmentation = false
 	}
+}
 
+// applyAugmentationOverrides applies augmentation-related command line overrides.
+func applyAugmentationOverrides(
+	cfg *config.Config,
+	customPrompt, augmentationType string,
+) {
 	if customPrompt != "" {
 		cfg.Augmentation.CustomPrompt = customPrompt
 	}
 
 	if augmentationType != "" {
-		// Validate augmentation type
-		if augmentationType == "commentary" || augmentationType == "summary" {
-			cfg.Augmentation.Type = augmentationType
-		} else {
-			fatalf("Invalid augmentation type: %s. Must be 'commentary' or 'summary'", augmentationType)
-		}
+		validateAndSetAugmentationType(cfg, augmentationType)
+	}
+}
+
+// validateAndSetAugmentationType validates and sets the augmentation type.
+func validateAndSetAugmentationType(cfg *config.Config, augmentationType string) {
+	if augmentationType == "commentary" || augmentationType == "summary" {
+		cfg.Augmentation.Type = augmentationType
+	} else {
+		fatalf("Invalid augmentation type: %s. Must be 'commentary' or 'summary'", augmentationType)
 	}
 }
 

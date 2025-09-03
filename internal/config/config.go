@@ -98,7 +98,25 @@ func FindProjectRoot(startDir string) (string, string, error) {
 
 // validate checks that the configuration is valid and sets defaults where appropriate.
 func (c *Config) validate() error {
-	// Validate required fields
+	err := c.validateRequiredFields()
+	if err != nil {
+		return err
+	}
+
+	c.setDefaultSettings()
+	c.setTesseractDefaults()
+	c.setAugmentationDefaults()
+
+	if err := c.validateGeminiSettings(); err != nil {
+		return err
+	}
+
+	c.setLoggingDefaults()
+
+	return nil
+}
+
+func (c *Config) validateRequiredFields() error {
 	if c.Paths.InputDir == "" {
 		return ErrInputDirRequired
 	}
@@ -107,7 +125,10 @@ func (c *Config) validate() error {
 		return ErrOutputDirRequired
 	}
 
-	// Set defaults for optional fields
+	return nil
+}
+
+func (c *Config) setDefaultSettings() {
 	if c.Settings.Workers <= 0 {
 		c.Settings.Workers = 4
 	}
@@ -115,8 +136,9 @@ func (c *Config) validate() error {
 	if c.Settings.TimeoutSeconds <= 0 {
 		c.Settings.TimeoutSeconds = 300
 	}
+}
 
-	// Validate Tesseract settings
+func (c *Config) setTesseractDefaults() {
 	if c.Tesseract.Language == "" {
 		c.Tesseract.Language = "eng"
 	}
@@ -136,40 +158,51 @@ func (c *Config) validate() error {
 	if c.Tesseract.TimeoutSeconds <= 0 {
 		c.Tesseract.TimeoutSeconds = 120
 	}
+}
 
-	// Set defaults for augmentation settings
+func (c *Config) setAugmentationDefaults() {
 	if c.Augmentation.Type == "" {
-		c.Augmentation.Type = "commentary" // Default to commentary mode
+		c.Augmentation.Type = "commentary"
+	}
+}
+
+func (c *Config) validateGeminiSettings() error {
+	if !c.Settings.EnableAugmentation {
+		return nil
 	}
 
-	// Validate Gemini settings if augmentation is enabled
-	if c.Settings.EnableAugmentation {
-		if c.Gemini.APIKeyVariable == "" {
-			return ErrAPIKeyRequired
-		}
-
-		if len(c.Gemini.Models) == 0 {
-			c.Gemini.Models = []string{"gemini-2.5-flash-lite"}
-		}
-
-		if c.Gemini.MaxRetries <= 0 {
-			c.Gemini.MaxRetries = 3
-		}
-
-		if c.Gemini.RetryDelaySeconds <= 0 {
-			c.Gemini.RetryDelaySeconds = 30
-		}
-
-		if c.Gemini.TimeoutSeconds <= 0 {
-			c.Gemini.TimeoutSeconds = 120
-		}
-
-		if c.Gemini.MaxTokens <= 0 {
-			c.Gemini.MaxTokens = 8192
-		}
+	if c.Gemini.APIKeyVariable == "" {
+		return ErrAPIKeyRequired
 	}
 
-	// Set logging defaults
+	c.setGeminiDefaults()
+
+	return nil
+}
+
+func (c *Config) setGeminiDefaults() {
+	if len(c.Gemini.Models) == 0 {
+		c.Gemini.Models = []string{"gemini-2.5-flash-lite"}
+	}
+
+	if c.Gemini.MaxRetries <= 0 {
+		c.Gemini.MaxRetries = 3
+	}
+
+	if c.Gemini.RetryDelaySeconds <= 0 {
+		c.Gemini.RetryDelaySeconds = 30
+	}
+
+	if c.Gemini.TimeoutSeconds <= 0 {
+		c.Gemini.TimeoutSeconds = 120
+	}
+
+	if c.Gemini.MaxTokens <= 0 {
+		c.Gemini.MaxTokens = 8192
+	}
+}
+
+func (c *Config) setLoggingDefaults() {
 	if c.Logging.Level == "" {
 		c.Logging.Level = "info"
 	}
@@ -177,8 +210,6 @@ func (c *Config) validate() error {
 	if c.Logging.Dir == "" {
 		c.Logging.Dir = "./logs"
 	}
-
-	return nil
 }
 
 // GetAPIKey retrieves the API key from the environment variable specified in the

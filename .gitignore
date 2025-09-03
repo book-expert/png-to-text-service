@@ -1,0 +1,6 @@
+/bin/
+/.idea/
+/.claude/
+/.gitignore
+/.git/
+/test_artifacts/*

@@ -95,44 +95,57 @@ func (c *Cleaner) cleanLines(input string) string {
 	var builder strings.Builder
 	builder.Grow(len(input))
 
+	scanner := c.createScanner(input)
+	c.processScannedLines(scanner, &builder)
+
+	err := scanner.Err()
+	if err != nil {
+		return input
+	}
+
+	return builder.String()
+}
+
+func (c *Cleaner) processScannedLines(scanner *bufio.Scanner, builder *strings.Builder) {
+	first := true
+
+	for scanner.Scan() {
+		line := c.processLine(scanner.Text())
+		if line == "" {
+			continue
+		}
+
+		c.addLineToBuilder(builder, line, &first)
+	}
+}
+
+func (c *Cleaner) addLineToBuilder(builder *strings.Builder, line string, first *bool) {
+	if !*first {
+		builder.WriteByte('\n')
+	}
+
+	*first = false
+
+	builder.WriteString(line)
+}
+
+func (c *Cleaner) createScanner(input string) *bufio.Scanner {
 	scanner := bufio.NewScanner(strings.NewReader(input))
 
-	// Increase scanner buffer to handle long lines
 	const maxLineSize = 1024 * 1024
 
 	buf := make([]byte, 0, initialBufferSize)
 	scanner.Buffer(buf, maxLineSize)
 
-	first := true
+	return scanner
+}
 
-	for scanner.Scan() {
-		line := scanner.Text()
+func (c *Cleaner) processLine(line string) string {
+	line = strings.TrimSpace(line)
 
-		line = strings.TrimSpace(line)
-
-		// Skip empty lines and punctuation-only lines
-		if line == "" || c.rePunctOnlyLine.MatchString(line) {
-			continue
-		}
-
-		// Collapse multiple spaces
-		line = c.reMultiSpace.ReplaceAllString(line, " ")
-
-		if !first {
-			builder.WriteByte('\n')
-		}
-
-		first = false
-
-		builder.WriteString(line)
+	if line == "" || c.rePunctOnlyLine.MatchString(line) {
+		return ""
 	}
 
-	// Check for scanner errors
-	err := scanner.Err()
-	if err != nil {
-		// If scanner fails, return the original input
-		return input
-	}
-
-	return builder.String()
+	return c.reMultiSpace.ReplaceAllString(line, " ")
 }

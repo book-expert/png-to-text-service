@@ -204,29 +204,43 @@ func (p *Pipeline) findPNGFiles(dir string) ([]string, error) {
 	err := filepath.WalkDir(
 		dir,
 		func(path string, dirEntry os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-
-			if dirEntry.IsDir() {
-				return nil
-			}
-
-			if strings.HasSuffix(strings.ToLower(dirEntry.Name()), ".png") {
-				pngFiles = append(pngFiles, path)
-			}
-
-			return nil
+			return p.handleWalkDirEntry(path, dirEntry, err, &pngFiles)
 		},
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	// Sort files for consistent processing order
 	sort.Strings(pngFiles)
 
 	return pngFiles, nil
+}
+
+// handleWalkDirEntry processes a single directory entry during file walking.
+func (p *Pipeline) handleWalkDirEntry(
+	path string,
+	dirEntry os.DirEntry,
+	err error,
+	pngFiles *[]string,
+) error {
+	if err != nil {
+		return err
+	}
+
+	if dirEntry.IsDir() {
+		return nil
+	}
+
+	if p.isPNGFile(dirEntry.Name()) {
+		*pngFiles = append(*pngFiles, path)
+	}
+
+	return nil
+}
+
+// isPNGFile checks if a filename is a PNG file.
+func (p *Pipeline) isPNGFile(filename string) bool {
+	return strings.HasSuffix(strings.ToLower(filename), ".png")
 }
 
 // processFilesParallel processes multiple files using a worker pool.
@@ -328,64 +342,23 @@ func (p *Pipeline) processFile(
 	ctx context.Context,
 	pngPath, outputPath string,
 ) ProcessingResult {
-	result := ProcessingResult{
-		ProcessedAt:   time.Now(),
-		Error:         nil,
-		PNGPath:       pngPath,
-		OutputPath:    outputPath,
-		OCRText:       "",
-		AugmentedText: "",
-		Success:       false,
-	}
+	result := p.initProcessingResult(pngPath, outputPath)
 
-	// Check if output already exists and we should skip
-	if p.skipExisting {
-		if _, err := os.Stat(outputPath); err == nil {
-			p.logger.Info(
-				"Skipping existing file: %s",
-				filepath.Base(outputPath),
-			)
-
-			result.Success = true
-
-			return result
-		}
-	}
-
-	// Step 1: OCR Processing
-	p.logger.Info("Running OCR on %s", filepath.Base(pngPath))
-
-	ocrText, err := p.ocrProcessor.ProcessPNG(ctx, pngPath)
-	if err != nil {
-		result.Error = fmt.Errorf("OCR processing: %w", err)
+	if p.shouldSkipExistingFile(outputPath) {
+		result.Success = true
 
 		return result
 	}
 
-	result.OCRText = ocrText
-
-	// Step 2: Text Augmentation (if enabled)
-	finalText := ocrText
-
-	if p.enableAugment && p.textAugmenter != nil {
-		p.logger.Info("Augmenting text for %s", filepath.Base(pngPath))
-
-		augmentedText, err := p.textAugmenter.AugmentText(ctx, ocrText, pngPath)
-		if err != nil {
-			p.logger.Warn(
-				"Text augmentation failed for %s: %v",
-				filepath.Base(pngPath),
-				err,
-			)
-			// Continue with OCR text only
-		} else {
-			finalText = augmentedText
-			result.AugmentedText = augmentedText
-		}
+	err := p.performOCR(ctx, pngPath, &result)
+	if err != nil {
+		return result
 	}
 
-	// Step 3: Write output
-	if err := p.writeOutput(outputPath, finalText); err != nil {
+	finalText := p.performAugmentation(ctx, pngPath, &result)
+
+	err = p.writeOutput(outputPath, finalText)
+	if err != nil {
 		result.Error = fmt.Errorf("write output: %w", err)
 
 		return result
@@ -400,6 +373,82 @@ func (p *Pipeline) processFile(
 	)
 
 	return result
+}
+
+// initProcessingResult creates and initializes a ProcessingResult.
+func (p *Pipeline) initProcessingResult(pngPath, outputPath string) ProcessingResult {
+	return ProcessingResult{
+		ProcessedAt:   time.Now(),
+		Error:         nil,
+		PNGPath:       pngPath,
+		OutputPath:    outputPath,
+		OCRText:       "",
+		AugmentedText: "",
+		Success:       false,
+	}
+}
+
+// shouldSkipExistingFile checks if we should skip processing an existing file.
+func (p *Pipeline) shouldSkipExistingFile(outputPath string) bool {
+	if !p.skipExisting {
+		return false
+	}
+
+	if _, err := os.Stat(outputPath); err == nil {
+		p.logger.Info("Skipping existing file: %s", filepath.Base(outputPath))
+
+		return true
+	}
+
+	return false
+}
+
+// performOCR runs OCR processing and updates the result.
+func (p *Pipeline) performOCR(
+	ctx context.Context,
+	pngPath string,
+	result *ProcessingResult,
+) error {
+	p.logger.Info("Running OCR on %s", filepath.Base(pngPath))
+
+	ocrText, err := p.ocrProcessor.ProcessPNG(ctx, pngPath)
+	if err != nil {
+		result.Error = fmt.Errorf("OCR processing: %w", err)
+
+		return err
+	}
+
+	result.OCRText = ocrText
+
+	return nil
+}
+
+// performAugmentation runs text augmentation if enabled and returns final text.
+func (p *Pipeline) performAugmentation(
+	ctx context.Context,
+	pngPath string,
+	result *ProcessingResult,
+) string {
+	if !p.enableAugment || p.textAugmenter == nil {
+		return result.OCRText
+	}
+
+	p.logger.Info("Augmenting text for %s", filepath.Base(pngPath))
+
+	augmentedText, err := p.textAugmenter.AugmentText(ctx, result.OCRText, pngPath)
+	if err != nil {
+		p.logger.Warn(
+			"Text augmentation failed for %s: %v",
+			filepath.Base(pngPath),
+			err,
+		)
+
+		return result.OCRText
+	}
+
+	result.AugmentedText = augmentedText
+
+	return augmentedText
 }
 
 // writeOutput writes the final text to the output file.
@@ -428,22 +477,40 @@ func (p *Pipeline) writeOutput(outputPath, text string) error {
 // reportResults logs summary statistics about the processing results.
 func (p *Pipeline) reportResults(results []ProcessingResult, startTime time.Time) {
 	duration := time.Since(startTime)
-	successful := 0
-	failed := 0
+	successful, failed := p.countResults(results)
 
+	p.logSummary(successful, len(results), failed, duration)
+	p.logAverageTime(successful, duration)
+}
+
+// countResults counts successful and failed processing results.
+func (p *Pipeline) countResults(results []ProcessingResult) (successful, failed int) {
 	for _, result := range results {
 		if result.Success {
 			successful++
 		} else {
 			failed++
 
-			if result.Error != nil {
-				p.logger.Error("Failed %s: %v", filepath.Base(result.PNGPath), result.Error)
-			}
+			p.logFailedResult(result)
 		}
 	}
 
-	total := len(results)
+	return successful, failed
+}
+
+// logFailedResult logs details about a failed processing result.
+func (p *Pipeline) logFailedResult(result ProcessingResult) {
+	if result.Error != nil {
+		p.logger.Error(
+			"Failed %s: %v",
+			filepath.Base(result.PNGPath),
+			result.Error,
+		)
+	}
+}
+
+// logSummary logs the overall processing summary.
+func (p *Pipeline) logSummary(successful, total, failed int, duration time.Duration) {
 	p.logger.Success(
 		"Processing complete: %d/%d successful, %d failed in %v",
 		successful,
@@ -451,7 +518,10 @@ func (p *Pipeline) reportResults(results []ProcessingResult, startTime time.Time
 		failed,
 		duration,
 	)
+}
 
+// logAverageTime logs the average processing time per successful file.
+func (p *Pipeline) logAverageTime(successful int, duration time.Duration) {
 	if successful > 0 {
 		avgTime := duration / time.Duration(successful)
 		p.logger.Info("Average time per successful file: %v", avgTime)
