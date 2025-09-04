@@ -357,7 +357,11 @@ func processSingleFile(
 
 	log.Info("Processing single file: %s -> %s", pngFile, outputPath)
 
-	return p.ProcessSingle(ctx, pngFile, outputPath)
+	if err := p.ProcessSingle(ctx, pngFile, outputPath); err != nil {
+		return fmt.Errorf("processing single file %s: %w", pngFile, err)
+	}
+
+	return nil
 }
 
 // processDirectory processes all PNG files in a directory.
@@ -378,7 +382,10 @@ func processDirectory(
 
 	log.Info("Processing directory: %s -> %s", inputDir, outputDir)
 
-	return p.ProcessDirectory(ctx, inputDir, outputDir)
+	if err := p.ProcessDirectory(ctx, inputDir, outputDir); err != nil {
+		return fmt.Errorf("processing directory %s: %w", inputDir, err)
+	}
+	return nil
 }
 
 // fatalf prints an error message and exits with code 1.

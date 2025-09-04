@@ -1,4 +1,3 @@
-// ./internal/ocr/tesseract.go
 // Package ocr provides OCR functionality using Tesseract.
 package ocr
 
@@ -18,9 +17,13 @@ import (
 )
 
 var (
+	// ErrInvalidExtension indicates that the file does not have a .png extension.
 	ErrInvalidExtension = errors.New("file must have .png extension")
+	// ErrPathIsDirectory indicates that the provided path is a directory, not a file.
 	ErrPathIsDirectory  = errors.New("path is a directory")
+	// ErrFileEmpty indicates that the file is empty.
 	ErrFileEmpty        = errors.New("file is empty")
+	// ErrOCRResultEmpty indicates that the OCR processing returned an empty result.
 	ErrOCRResultEmpty   = errors.New("empty OCR result")
 )
 

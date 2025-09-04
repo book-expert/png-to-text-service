@@ -1,4 +1,3 @@
-// ./internal/augment/gemini.go
 // Package augment provides AI-powered text augmentation using Gemini models.
 package augment
 
@@ -20,10 +19,15 @@ import (
 )
 
 var (
+	// ErrImagePathRequired indicates that an image path is required for processing.
 	ErrImagePathRequired = errors.New("image path is required")
+	// ErrEmptyResponse indicates that the Gemini API returned an empty response.
 	ErrEmptyResponse     = errors.New("empty response")
+	// ErrNoCandidates indicates that no candidates were found in the API response.
 	ErrNoCandidates      = errors.New("no candidates in response")
+	// ErrGeminiAPIError indicates a generic Gemini API error.
 	ErrGeminiAPIError    = errors.New("gemini API error")
+	// ErrMaxRetries indicates that the maximum number of retries has been exceeded.
 	ErrMaxRetries        = errors.New("max retries exceeded")
 )
 
@@ -155,7 +159,8 @@ func (g *GeminiProcessor) AugmentTextWithOptions(
 	ocrText, imagePath string,
 	opts *AugmentationOptions,
 ) (string, error) {
-	if err := g.validateInputs(ocrText, imagePath); err != nil {
+	err := g.validateInputs(ocrText, imagePath)
+	if err != nil {
 		return "", fmt.Errorf("validate inputs: %w", err)
 	}
 
@@ -173,7 +178,7 @@ func (g *GeminiProcessor) AugmentTextWithOptions(
 }
 
 // validateInputs checks that the required inputs are valid.
-func (g *GeminiProcessor) validateInputs(ocrText, imagePath string) error {
+func (g *GeminiProcessor) validateInputs(_, imagePath string) error {
 	if imagePath == "" {
 		return ErrImagePathRequired
 	}
@@ -390,7 +395,7 @@ func (g *GeminiProcessor) buildRetryError(model string, attempt int, err error) 
 func (g *GeminiProcessor) waitBeforeRetry(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("context canceled during retry wait: %w", ctx.Err())
 	case <-time.After(time.Duration(g.config.RetryDelaySeconds) * time.Second):
 		return nil
 	}
@@ -420,8 +425,8 @@ func (g *GeminiProcessor) callGeminiAPI(
 		return "", err
 	}
 
-	if err := g.checkHTTPError(resp.StatusCode, respBytes); err != nil {
-		return "", err
+	if httpErr := g.checkHTTPError(resp.StatusCode, respBytes); httpErr != nil {
+		return "", httpErr
 	}
 
 	geminiResp, err := g.parseResponse(respBytes)
@@ -646,10 +651,20 @@ func (g *GeminiProcessor) tryAllModels(
 
 // getCommentaryPrompt returns the default commentary prompt.
 func getCommentaryPrompt() string {
-	return "You are a PhD-level technical narrator specializing in accessibility commentary. Integrate descriptive commentary derived from the page image into the OCR text, producing a coherent narration for text-to-speech. Focus on describing people, environment, figures, diagrams, and visual elements like movie accessibility features. Maintain technical accuracy, describe visual content as natural prose inserted near relevant context, avoid markdown formatting, and output continuous paragraphs."
+	return "You are a PhD-level technical narrator specializing in accessibility commentary. " +
+		"Integrate descriptive commentary derived from the page image into the OCR text, " +
+		"producing a coherent narration for text-to-speech. Focus on describing people, " +
+		"environment, figures, diagrams, and visual elements like movie accessibility features. " +
+		"Maintain technical accuracy, describe visual content as natural prose inserted " +
+		"near relevant context, avoid markdown formatting, and output continuous paragraphs."
 }
 
 // getSummaryPrompt returns the default summary prompt.
 func getSummaryPrompt() string {
-	return "You are a PhD-level technical summarizer. Enhance the OCR text by adding a comprehensive summary at the end of the content. The summary should capture key points, main concepts, and important details from both the OCR text and visual elements in the image. Maintain technical accuracy, avoid markdown formatting, and structure the output as: [original OCR text] followed by [SUMMARY: comprehensive summary paragraph]."
+	return "You are a PhD-level technical summarizer. Enhance the OCR text by adding " +
+		"a comprehensive summary at the end of the content. The summary should capture " +
+		"key points, main concepts, and important details from both the OCR text and " +
+		"visual elements in the image. Maintain technical accuracy, avoid markdown " +
+		"formatting, and structure the output as: [original OCR text] followed by " +
+		"[SUMMARY: comprehensive summary paragraph]."
 }

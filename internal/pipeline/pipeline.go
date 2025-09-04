@@ -1,4 +1,3 @@
-// ./internal/pipeline/pipeline.go
 // Package pipeline orchestrates the complete PNG → OCR → Augmentation → Output flow.
 package pipeline
 
@@ -26,6 +25,7 @@ const (
 	defaultDirPermission  = 0o750
 )
 
+// ErrAPIKeyNotFound indicates that the required API key was not found in the environment variable.
 var ErrAPIKeyNotFound = errors.New("API key not found in environment variable")
 
 // OCRProcessor defines the interface for OCR processing.
@@ -209,7 +209,7 @@ func (p *Pipeline) findPNGFiles(dir string) ([]string, error) {
 		},
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("walking directory %s: %w", dir, err)
 	}
 
 	sort.Strings(pngFiles)
@@ -275,7 +275,7 @@ func (p *Pipeline) processFilesParallel(
 	}()
 
 	// Collect results
-	var allResults []ProcessingResult
+	allResults := make([]ProcessingResult, 0, len(pngFiles))
 	for result := range results {
 		allResults = append(allResults, result)
 	}
@@ -416,7 +416,7 @@ func (p *Pipeline) performOCR(
 	if err != nil {
 		result.Error = fmt.Errorf("OCR processing: %w", err)
 
-		return err
+		return fmt.Errorf("OCR processing failed for %s: %w", pngPath, err)
 	}
 
 	result.OCRText = ocrText

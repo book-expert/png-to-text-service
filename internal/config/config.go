@@ -1,4 +1,3 @@
-// ./internal/config/config.go
 // Package config provides configuration management for the PNG-to-text service.
 // It loads and validates configuration from project.toml files.
 package config
@@ -18,9 +17,12 @@ const (
 )
 
 var (
-	ErrInputDirRequired  = errors.New("paths.input_dir is required")
+	// ErrInputDirRequired indicates that the input directory path is required.
+	ErrInputDirRequired = errors.New("paths.input_dir is required")
+	// ErrOutputDirRequired indicates that the output directory path is required.
 	ErrOutputDirRequired = errors.New("paths.output_dir is required")
-	ErrAPIKeyRequired    = errors.New(
+	// ErrAPIKeyRequired indicates that the API key variable is required when augmentation is enabled.
+	ErrAPIKeyRequired = errors.New(
 		"gemini.api_key_variable is required when augmentation is enabled",
 	)
 )
@@ -85,7 +87,8 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("load configuration: %w", err)
 	}
 
-	if err := config.validate(); err != nil {
+	err = config.validate()
+	if err != nil {
 		return nil, fmt.Errorf("validate configuration: %w", err)
 	}
 
@@ -94,7 +97,12 @@ func Load(configPath string) (*Config, error) {
 
 // FindProjectRoot searches for project.toml starting from the given directory.
 func FindProjectRoot(startDir string) (rootDir, configPath string, err error) {
-	return configurator.FindProjectRoot(startDir)
+	rootDir, configPath, err = configurator.FindProjectRoot(startDir)
+	if err != nil {
+		return "", "", fmt.Errorf("finding project root from %s: %w", startDir, err)
+	}
+
+	return rootDir, configPath, nil
 }
 
 // GetAPIKey retrieves the API key from the environment variable specified in the
@@ -141,7 +149,8 @@ func (c *Config) validate() error {
 	c.setTesseractDefaults()
 	c.setAugmentationDefaults()
 
-	if err := c.validateGeminiSettings(); err != nil {
+	err = c.validateGeminiSettings()
+	if err != nil {
 		return err
 	}
 
