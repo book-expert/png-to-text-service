@@ -13,9 +13,8 @@ import (
 	"time"
 
 	"github.com/nnikolov3/logger"
-	"github.com/nnikolov3/png-to-text-service/internal/config"
-
 	"github.com/nnikolov3/png-to-text-service/internal/augment"
+	"github.com/nnikolov3/png-to-text-service/internal/config"
 	"github.com/nnikolov3/png-to-text-service/internal/ocr"
 )
 
@@ -25,8 +24,13 @@ const (
 	defaultDirPermission  = 0o750
 )
 
-// ErrAPIKeyNotFound indicates that the required API key was not found in the environment variable.
-var ErrAPIKeyNotFound = errors.New("API key not found in environment variable")
+var (
+	// ErrAPIKeyNotFound indicates that the required API key was not found
+	// in the environment variable.
+	ErrAPIKeyNotFound = errors.New("API key not found in environment variable")
+	// ErrAugmentationDisabled indicates that text augmentation is disabled.
+	ErrAugmentationDisabled = errors.New("text augmentation is disabled")
+)
 
 // OCRProcessor defines the interface for OCR processing.
 type OCRProcessor interface {
@@ -62,58 +66,11 @@ type ProcessingResult struct {
 
 // NewPipeline creates a new processing pipeline with the given configuration.
 func NewPipeline(cfg *config.Config, log *logger.Logger) (*Pipeline, error) {
-	// Create OCR processor
-	tesseractConfig := ocr.TesseractConfig{
-		Language:       cfg.Tesseract.Language,
-		OEM:            cfg.Tesseract.OEM,
-		PSM:            cfg.Tesseract.PSM,
-		DPI:            cfg.Tesseract.DPI,
-		TimeoutSeconds: cfg.Tesseract.TimeoutSeconds,
-	}
-	ocrProcessor := ocr.NewProcessor(tesseractConfig, log)
+	ocrProcessor := newOCRProcessorFromConfig(cfg, log)
 
-	// Create text augmenter if enabled
-	var textAugmenter TextAugmenter
-
-	if cfg.Settings.EnableAugmentation {
-		apiKey := cfg.GetAPIKey()
-		if apiKey == "" {
-			return nil, fmt.Errorf(
-				"API key not found in environment variable %s: %w",
-				cfg.Gemini.APIKeyVariable,
-				ErrAPIKeyNotFound,
-			)
-		}
-
-		// Convert augmentation type string to enum
-		var augmentationType augment.AugmentationType
-
-		switch cfg.Augmentation.Type {
-		case "commentary":
-			augmentationType = augment.AugmentationCommentary
-		case "summary":
-			augmentationType = augment.AugmentationSummary
-		default:
-			augmentationType = augment.AugmentationCommentary // Default
-		}
-
-		geminiConfig := augment.GeminiConfig{
-			APIKey:            apiKey,
-			Models:            cfg.Gemini.Models,
-			MaxRetries:        cfg.Gemini.MaxRetries,
-			RetryDelaySeconds: cfg.Gemini.RetryDelaySeconds,
-			TimeoutSeconds:    cfg.Gemini.TimeoutSeconds,
-			Temperature:       cfg.Gemini.Temperature,
-			TopK:              cfg.Gemini.TopK,
-			TopP:              cfg.Gemini.TopP,
-			MaxTokens:         cfg.Gemini.MaxTokens,
-			PromptTemplate:    cfg.Prompts.Augmentation,
-			AugmentationType:  augmentationType,
-			CustomPrompt:      cfg.Augmentation.CustomPrompt,
-			UsePromptBuilder:  cfg.Augmentation.UsePromptBuilder,
-		}
-
-		textAugmenter = augment.NewGeminiProcessor(&geminiConfig, log)
+	textAugmenter, err := newTextAugmenterFromConfig(cfg, log)
+	if err != nil && !errors.Is(err, ErrAugmentationDisabled) {
+		return nil, err
 	}
 
 	return &Pipeline{
@@ -127,11 +84,79 @@ func NewPipeline(cfg *config.Config, log *logger.Logger) (*Pipeline, error) {
 	}, nil
 }
 
+// newOCRProcessorFromConfig creates an OCR processor from the given configuration.
+// Returns a concrete struct pointer to the struct.
+func newOCRProcessorFromConfig(cfg *config.Config, log *logger.Logger) *ocr.Processor {
+	tesseractConfig := ocr.TesseractConfig{
+		Language:       cfg.Tesseract.Language,
+		OEM:            cfg.Tesseract.OEM,
+		PSM:            cfg.Tesseract.PSM,
+		DPI:            cfg.Tesseract.DPI,
+		TimeoutSeconds: cfg.Tesseract.TimeoutSeconds,
+	}
+
+	return ocr.NewProcessor(tesseractConfig, log)
+}
+
+// It now returns a concrete *augment.GeminiProcessor to be more explicit,
+// following the Go best practice "Accept interfaces, return structs.".
+func newTextAugmenterFromConfig(
+	cfg *config.Config,
+	log *logger.Logger,
+) (*augment.GeminiProcessor, error) {
+	// Check if augmentation is enabled
+	if !cfg.Settings.EnableAugmentation {
+		return nil, ErrAugmentationDisabled
+	}
+
+	apiKey := cfg.GetAPIKey()
+	if apiKey == "" {
+		return nil, fmt.Errorf(
+			"API key not found in environment variable %s: %w",
+			cfg.Gemini.APIKeyVariable,
+			ErrAPIKeyNotFound,
+		)
+	}
+
+	augmentationType := parseAugmentationType(cfg.Augmentation.Type)
+
+	geminiConfig := augment.GeminiConfig{
+		APIKey:            apiKey,
+		Models:            cfg.Gemini.Models,
+		MaxRetries:        cfg.Gemini.MaxRetries,
+		RetryDelaySeconds: cfg.Gemini.RetryDelaySeconds,
+		TimeoutSeconds:    cfg.Gemini.TimeoutSeconds,
+		Temperature:       cfg.Gemini.Temperature,
+		TopK:              cfg.Gemini.TopK,
+		TopP:              cfg.Gemini.TopP,
+		MaxTokens:         cfg.Gemini.MaxTokens,
+		PromptTemplate:    cfg.Prompts.Augmentation,
+		AugmentationType:  augmentationType,
+		CustomPrompt:      cfg.Augmentation.CustomPrompt,
+		UsePromptBuilder:  cfg.Augmentation.UsePromptBuilder,
+	}
+
+	return augment.NewGeminiProcessor(&geminiConfig, log), nil
+}
+
+// parseAugmentationType converts augmentation type string to enum.
+func parseAugmentationType(augmentType string) augment.AugmentationType {
+	switch augmentType {
+	case "commentary":
+		return augment.AugmentationCommentary
+	case "summary":
+		return augment.AugmentationSummary
+	default:
+		return augment.AugmentationCommentary // Default
+	}
+}
+
 // ProcessDirectory processes all PNG files in a directory.
 func (p *Pipeline) ProcessDirectory(
 	ctx context.Context,
 	inputDir, outputDir string,
 ) error {
+	// Start time
 	startTime := time.Now()
 
 	p.logger.Info(
@@ -224,6 +249,7 @@ func (p *Pipeline) handleWalkDirEntry(
 	err error,
 	pngFiles *[]string,
 ) error {
+	// Handle error
 	if err != nil {
 		return err
 	}
@@ -250,6 +276,7 @@ func (p *Pipeline) processFilesParallel(
 	pngFiles []string,
 	inputDir, outputDir string,
 ) []ProcessingResult {
+	// Initialize channels
 	jobs := make(chan string, len(pngFiles))
 	results := make(chan ProcessingResult, len(pngFiles))
 
@@ -291,6 +318,7 @@ func (p *Pipeline) worker(
 	results chan<- ProcessingResult,
 	inputDir, outputDir string,
 ) {
+	// Defer
 	defer waitGroup.Done()
 
 	for pngPath := range jobs {
@@ -343,6 +371,7 @@ func (p *Pipeline) processFile(
 	ctx context.Context,
 	pngPath, outputPath string,
 ) ProcessingResult {
+	// Initialize result
 	result := p.initProcessingResult(pngPath, outputPath)
 
 	if p.shouldSkipExistingFile(outputPath) {
@@ -395,7 +424,8 @@ func (p *Pipeline) shouldSkipExistingFile(outputPath string) bool {
 		return false
 	}
 
-	if _, err := os.Stat(outputPath); err == nil {
+	_, err := os.Stat(outputPath)
+	if err == nil {
 		p.logger.Info("Skipping existing file: %s", filepath.Base(outputPath))
 
 		return true
@@ -410,6 +440,7 @@ func (p *Pipeline) performOCR(
 	pngPath string,
 	result *ProcessingResult,
 ) error {
+	// Update logger
 	p.logger.Info("Running OCR on %s", filepath.Base(pngPath))
 
 	ocrText, err := p.ocrProcessor.ProcessPNG(ctx, pngPath)
@@ -430,6 +461,7 @@ func (p *Pipeline) performAugmentation(
 	pngPath string,
 	result *ProcessingResult,
 ) string {
+	// Check if augmentation is enabled
 	if !p.enableAugment || p.textAugmenter == nil {
 		return result.OCRText
 	}

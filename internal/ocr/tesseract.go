@@ -20,11 +20,11 @@ var (
 	// ErrInvalidExtension indicates that the file does not have a .png extension.
 	ErrInvalidExtension = errors.New("file must have .png extension")
 	// ErrPathIsDirectory indicates that the provided path is a directory, not a file.
-	ErrPathIsDirectory  = errors.New("path is a directory")
+	ErrPathIsDirectory = errors.New("path is a directory")
 	// ErrFileEmpty indicates that the file is empty.
-	ErrFileEmpty        = errors.New("file is empty")
+	ErrFileEmpty = errors.New("file is empty")
 	// ErrOCRResultEmpty indicates that the OCR processing returned an empty result.
-	ErrOCRResultEmpty   = errors.New("empty OCR result")
+	ErrOCRResultEmpty = errors.New("empty OCR result")
 )
 
 // TesseractConfig holds configuration for Tesseract OCR.
@@ -52,7 +52,8 @@ func NewProcessor(config TesseractConfig, log *logger.Logger) *Processor {
 
 // ProcessPNG performs OCR on a PNG file and returns cleaned text.
 func (p *Processor) ProcessPNG(ctx context.Context, pngPath string) (string, error) {
-	if err := p.validateFile(pngPath); err != nil {
+	err := p.validateFile(pngPath)
+	if err != nil {
 		return "", fmt.Errorf("validate PNG file: %w", err)
 	}
 

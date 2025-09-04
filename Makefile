@@ -30,7 +30,9 @@ vet:
 # Run comprehensive linting
 lint:
 	@echo "Running golangci-lint..."
-	@golangci-lint run ./...
+	@golangci-lint run --fix ./...
+	@go vet ./...
+	@gofmt -w -s .
 
 # Run tests
 test:

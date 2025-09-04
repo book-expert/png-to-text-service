@@ -22,13 +22,13 @@ var (
 	// ErrImagePathRequired indicates that an image path is required for processing.
 	ErrImagePathRequired = errors.New("image path is required")
 	// ErrEmptyResponse indicates that the Gemini API returned an empty response.
-	ErrEmptyResponse     = errors.New("empty response")
+	ErrEmptyResponse = errors.New("empty response")
 	// ErrNoCandidates indicates that no candidates were found in the API response.
-	ErrNoCandidates      = errors.New("no candidates in response")
+	ErrNoCandidates = errors.New("no candidates in response")
 	// ErrGeminiAPIError indicates a generic Gemini API error.
-	ErrGeminiAPIError    = errors.New("gemini API error")
+	ErrGeminiAPIError = errors.New("gemini API error")
 	// ErrMaxRetries indicates that the maximum number of retries has been exceeded.
-	ErrMaxRetries        = errors.New("max retries exceeded")
+	ErrMaxRetries = errors.New("max retries exceeded")
 )
 
 // AugmentationType defines the type of augmentation to perform.
@@ -183,7 +183,8 @@ func (g *GeminiProcessor) validateInputs(_, imagePath string) error {
 		return ErrImagePathRequired
 	}
 
-	if _, err := os.Stat(imagePath); err != nil {
+	_, err := os.Stat(imagePath)
+	if err != nil {
 		return fmt.Errorf("access image file: %w", err)
 	}
 
@@ -236,12 +237,21 @@ func (g *GeminiProcessor) buildPromptWithOptions(
 	}
 
 	// Fall back to original prompt building logic with type-specific defaults
-	augmentationType := g.config.AugmentationType
-	if opts != nil && opts.Type != "" {
-		augmentationType = opts.Type
-	}
+	augmentationType := g.determineAugmentationType(opts)
 
 	return g.buildPromptForType(ocrText, augmentationType), nil
+}
+
+// determineAugmentationType resolves the augmentation type from options or config
+// defaults.
+func (g *GeminiProcessor) determineAugmentationType(
+	opts *AugmentationOptions,
+) AugmentationType {
+	if opts != nil && opts.Type != "" {
+		return opts.Type
+	}
+
+	return g.config.AugmentationType
 }
 
 // buildCustomPrompt constructs a prompt using a custom template.
@@ -263,8 +273,6 @@ func (g *GeminiProcessor) buildCustomPrompt(ocrText, customPrompt string) string
 }
 
 // buildPromptWithBuilder constructs a prompt using a simple built-in template system.
-// Note: This is a simplified implementation. In the future, this could be enhanced
-// with a proper external prompt-builder library when it has a stable public API.
 func (g *GeminiProcessor) buildPromptWithBuilder(
 	ocrText string,
 	opts *AugmentationOptions,
@@ -409,26 +417,46 @@ func (g *GeminiProcessor) callGeminiAPI(
 	url := g.buildAPIURL(model)
 	reqBody := g.buildRequestBody(prompt, imageData, mimeType)
 
-	req, err := g.createHTTPRequest(ctx, url, reqBody)
+	respBytes, err := g.performHTTPRequest(ctx, url, reqBody)
 	if err != nil {
 		return "", err
 	}
 
+	return g.processAPIResponse(respBytes)
+}
+
+// performHTTPRequest handles the HTTP request and response reading.
+func (g *GeminiProcessor) performHTTPRequest(
+	ctx context.Context,
+	url string,
+	reqBody geminiRequest,
+) ([]byte, error) {
+	req, err := g.createHTTPRequest(ctx, url, reqBody)
+	if err != nil {
+		return nil, err
+	}
+
 	resp, err := g.executeRequest(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer g.closeResponse(resp)
 
 	respBytes, err := g.readResponseBody(resp)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	if httpErr := g.checkHTTPError(resp.StatusCode, respBytes); httpErr != nil {
-		return "", httpErr
+	httpErr := g.checkHTTPError(resp.StatusCode, respBytes)
+	if httpErr != nil {
+		return nil, httpErr
 	}
 
+	return respBytes, nil
+}
+
+// processAPIResponse handles parsing and extracting text from the API response.
+func (g *GeminiProcessor) processAPIResponse(respBytes []byte) (string, error) {
 	geminiResp, err := g.parseResponse(respBytes)
 	if err != nil {
 		return "", err
@@ -455,8 +483,12 @@ func (g *GeminiProcessor) buildRequestBody(
 			{
 				Role: "user",
 				Parts: []geminiPart{
-					{Text: prompt},
 					{
+						Text:       prompt,
+						InlineData: nil,
+					},
+					{
+						Text: "",
 						InlineData: &geminiInlineData{
 							MimeType: mimeType,
 							Data:     imageData,

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/nnikolov3/logger"
-
 	"github.com/nnikolov3/png-to-text-service/internal/config"
 	"github.com/nnikolov3/png-to-text-service/internal/pipeline"
 )
@@ -121,7 +120,7 @@ func parseCommandLineFlags() commandLineFlags {
 
 // printVersionAndExit prints version information and exits.
 func printVersionAndExit() {
-	fmt.Println("png-to-text-service version 1.0.0")
+	_, _ = fmt.Fprintln(os.Stdout, "png-to-text-service version 1.0.0")
 	os.Exit(0)
 }
 
@@ -333,12 +332,16 @@ func setupSignalHandling(cancel context.CancelFunc, log *logger.Logger) {
 // processSingleFile processes a single PNG file.
 func processSingleFile(
 	ctx context.Context,
-	p *pipeline.Pipeline,
+	processingPipeline *pipeline.Pipeline,
 	pngFile, outputDir string,
 	log *logger.Logger,
 ) error {
+	var err error
+
 	if !filepath.IsAbs(pngFile) {
-		abs, err := filepath.Abs(pngFile)
+		var abs string
+
+		abs, err = filepath.Abs(pngFile)
 		if err != nil {
 			return fmt.Errorf(
 				"resolve absolute path for %s: %w",
@@ -357,7 +360,8 @@ func processSingleFile(
 
 	log.Info("Processing single file: %s -> %s", pngFile, outputPath)
 
-	if err := p.ProcessSingle(ctx, pngFile, outputPath); err != nil {
+	err = processingPipeline.ProcessSingle(ctx, pngFile, outputPath)
+	if err != nil {
 		return fmt.Errorf("processing single file %s: %w", pngFile, err)
 	}
 
@@ -367,7 +371,7 @@ func processSingleFile(
 // processDirectory processes all PNG files in a directory.
 func processDirectory(
 	ctx context.Context,
-	p *pipeline.Pipeline,
+	processingPipeline *pipeline.Pipeline,
 	inputDir, outputDir string,
 	log *logger.Logger,
 ) error {
@@ -376,13 +380,15 @@ func processDirectory(
 	}
 
 	// Validate input directory exists
-	if _, err := os.Stat(inputDir); err != nil {
+	_, err := os.Stat(inputDir)
+	if err != nil {
 		return fmt.Errorf("input directory %s: %w", inputDir, err)
 	}
 
 	log.Info("Processing directory: %s -> %s", inputDir, outputDir)
 
-	if err := p.ProcessDirectory(ctx, inputDir, outputDir); err != nil {
+	err = processingPipeline.ProcessDirectory(ctx, inputDir, outputDir)
+	if err != nil {
 		return fmt.Errorf("processing directory %s: %w", inputDir, err)
 	}
 
