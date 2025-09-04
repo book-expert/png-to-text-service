@@ -1,3 +1,4 @@
+// ./internal/config/config.go
 // Package config provides configuration management for the PNG-to-text service.
 // It loads and validates configuration from project.toml files.
 package config
@@ -92,8 +93,41 @@ func Load(configPath string) (*Config, error) {
 }
 
 // FindProjectRoot searches for project.toml starting from the given directory.
-func FindProjectRoot(startDir string) (string, string, error) {
+func FindProjectRoot(startDir string) (rootDir, configPath string, err error) {
 	return configurator.FindProjectRoot(startDir)
+}
+
+// GetAPIKey retrieves the API key from the environment variable specified in the
+// configuration.
+func (c *Config) GetAPIKey() string {
+	if c.Gemini.APIKeyVariable == "" {
+		return ""
+	}
+
+	return os.Getenv(c.Gemini.APIKeyVariable)
+}
+
+// EnsureDirectories creates necessary directories if they don't exist.
+func (c *Config) EnsureDirectories() error {
+	dirs := []string{
+		c.Paths.InputDir,
+		c.Paths.OutputDir,
+		c.Logging.Dir,
+	}
+
+	for _, dir := range dirs {
+		err := os.MkdirAll(dir, defaultDirPermission)
+		if err != nil {
+			return fmt.Errorf("create directory %s: %w", dir, err)
+		}
+	}
+
+	return nil
+}
+
+// GetLogFilePath returns the path for log files.
+func (c *Config) GetLogFilePath(filename string) string {
+	return filepath.Join(c.Logging.Dir, filename)
 }
 
 // validate checks that the configuration is valid and sets defaults where appropriate.
@@ -182,7 +216,7 @@ func (c *Config) validateGeminiSettings() error {
 
 func (c *Config) setGeminiDefaults() {
 	if len(c.Gemini.Models) == 0 {
-		c.Gemini.Models = []string{"gemini-2.5-flash-lite"}
+		c.Gemini.Models = []string{"gemini-1.5-flash"}
 	}
 
 	if c.Gemini.MaxRetries <= 0 {
@@ -210,37 +244,4 @@ func (c *Config) setLoggingDefaults() {
 	if c.Logging.Dir == "" {
 		c.Logging.Dir = "./logs"
 	}
-}
-
-// GetAPIKey retrieves the API key from the environment variable specified in the
-// configuration.
-func (c *Config) GetAPIKey() string {
-	if c.Gemini.APIKeyVariable == "" {
-		return ""
-	}
-
-	return os.Getenv(c.Gemini.APIKeyVariable)
-}
-
-// EnsureDirectories creates necessary directories if they don't exist.
-func (c *Config) EnsureDirectories() error {
-	dirs := []string{
-		c.Paths.InputDir,
-		c.Paths.OutputDir,
-		c.Logging.Dir,
-	}
-
-	for _, dir := range dirs {
-		err := os.MkdirAll(dir, defaultDirPermission)
-		if err != nil {
-			return fmt.Errorf("create directory %s: %w", dir, err)
-		}
-	}
-
-	return nil
-}
-
-// GetLogFilePath returns the path for log files.
-func (c *Config) GetLogFilePath(filename string) string {
-	return filepath.Join(c.Logging.Dir, filename)
 }

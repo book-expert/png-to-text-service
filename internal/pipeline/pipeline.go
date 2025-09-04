@@ -1,3 +1,4 @@
+// ./internal/pipeline/pipeline.go
 // Package pipeline orchestrates the complete PNG → OCR → Augmentation → Output flow.
 package pipeline
 
@@ -13,9 +14,9 @@ import (
 	"time"
 
 	"github.com/nnikolov3/logger"
+	"github.com/nnikolov3/png-to-text-service/internal/config"
 
 	"github.com/nnikolov3/png-to-text-service/internal/augment"
-	"github.com/nnikolov3/png-to-text-service/internal/config"
 	"github.com/nnikolov3/png-to-text-service/internal/ocr"
 )
 
@@ -60,7 +61,7 @@ type ProcessingResult struct {
 }
 
 // NewPipeline creates a new processing pipeline with the given configuration.
-func NewPipeline(cfg *config.Config, logger *logger.Logger) (*Pipeline, error) {
+func NewPipeline(cfg *config.Config, log *logger.Logger) (*Pipeline, error) {
 	// Create OCR processor
 	tesseractConfig := ocr.TesseractConfig{
 		Language:       cfg.Tesseract.Language,
@@ -69,7 +70,7 @@ func NewPipeline(cfg *config.Config, logger *logger.Logger) (*Pipeline, error) {
 		DPI:            cfg.Tesseract.DPI,
 		TimeoutSeconds: cfg.Tesseract.TimeoutSeconds,
 	}
-	ocrProcessor := ocr.NewProcessor(tesseractConfig, logger)
+	ocrProcessor := ocr.NewProcessor(tesseractConfig, log)
 
 	// Create text augmenter if enabled
 	var textAugmenter TextAugmenter
@@ -112,14 +113,14 @@ func NewPipeline(cfg *config.Config, logger *logger.Logger) (*Pipeline, error) {
 			UsePromptBuilder:  cfg.Augmentation.UsePromptBuilder,
 		}
 
-		textAugmenter = augment.NewGeminiProcessor(geminiConfig, logger)
+		textAugmenter = augment.NewGeminiProcessor(&geminiConfig, log)
 	}
 
 	return &Pipeline{
 		ocrProcessor:  ocrProcessor,
 		textAugmenter: textAugmenter,
 		config:        cfg,
-		logger:        logger,
+		logger:        log,
 		enableAugment: cfg.Settings.EnableAugmentation,
 		skipExisting:  cfg.Settings.SkipExisting,
 		workers:       cfg.Settings.Workers,
@@ -485,7 +486,8 @@ func (p *Pipeline) reportResults(results []ProcessingResult, startTime time.Time
 
 // countResults counts successful and failed processing results.
 func (p *Pipeline) countResults(results []ProcessingResult) (successful, failed int) {
-	for _, result := range results {
+	for i := range results {
+		result := &results[i]
 		if result.Success {
 			successful++
 		} else {
@@ -499,7 +501,7 @@ func (p *Pipeline) countResults(results []ProcessingResult) (successful, failed 
 }
 
 // logFailedResult logs details about a failed processing result.
-func (p *Pipeline) logFailedResult(result ProcessingResult) {
+func (p *Pipeline) logFailedResult(result *ProcessingResult) {
 	if result.Error != nil {
 		p.logger.Error(
 			"Failed %s: %v",

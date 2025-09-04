@@ -1,504 +1,388 @@
+// ./cmd/png-to-text-service/main.go
+// PNG-to-text-service: Unified PNG → OCR → AI Augmentation pipeline
 package config_test
 
 import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"testing"
+	"syscall"
+	"time"
+
+	"github.com/nnikolov3/logger"
 
 	"github.com/nnikolov3/png-to-text-service/internal/config"
+	"github.com/nnikolov3/png-to-text-service/internal/pipeline"
 )
 
-// testHelper provides common test utilities and reduces code duplication.
-type testHelper struct {
-	t *testing.T
-}
+var ErrDirectoriesRequired = errors.New("input and output directories must be specified")
 
-// newTestHelper creates a new test helper instance.
-func newTestHelper(t *testing.T) *testHelper {
-	t.Helper()
+func main() {
+	flags := parseCommandLineFlags()
 
-	return &testHelper{t: t}
-}
-
-// createTempDir creates a temporary directory for testing.
-func (h *testHelper) createTempDir(prefix string) (string, func()) {
-	tmpDir, err := os.MkdirTemp("", prefix)
-	if err != nil {
-		h.t.Fatalf("Failed to create temp dir: %v", err)
+	if flags.versionFlag {
+		printVersionAndExit()
 	}
 
-	cleanup := func() {
-		removeErr := os.RemoveAll(tmpDir)
-		if removeErr != nil {
-			h.t.Logf("Failed to remove temp dir: %v", removeErr)
-		}
-	}
+	cfg, loggerInstance := initializeApplication(flags.configPathFlag)
+	defer closeLogger(loggerInstance)
 
-	return tmpDir, cleanup
-}
-
-// writeConfigFile writes content to a config file in the given directory.
-func (h *testHelper) writeConfigFile(dir, content string) string {
-	configPath := filepath.Join(dir, "project.toml")
-
-	err := os.WriteFile(configPath, []byte(content), 0o600)
-	if err != nil {
-		h.t.Fatalf("Failed to write config file: %v", err)
-	}
-
-	return configPath
-}
-
-// validateDirectoryExists checks that a directory exists.
-func (h *testHelper) validateDirectoryExists(dir string) {
-	if _, err := os.Stat(dir); err != nil {
-		h.t.Errorf("Directory %s was not created: %v", dir, err)
-	}
-}
-
-// envTestHelper provides environment variable testing utilities.
-type envTestHelper struct {
-	t *testing.T
-}
-
-// newEnvTestHelper creates a new environment test helper.
-func newEnvTestHelper(t *testing.T) *envTestHelper {
-	t.Helper()
-
-	return &envTestHelper{t: t}
-}
-
-// withEnvVar sets an environment variable for the duration of the test function.
-func (h *envTestHelper) withEnvVar(key, value string, testFunc func()) {
-	oldVal := os.Getenv(key)
-
-	err := os.Setenv(key, value)
-	if err != nil {
-		h.t.Fatalf("Failed to set env var: %v", err)
-	}
-
-	defer h.restoreEnvVar(key, oldVal)
-
-	testFunc()
-}
-
-func (h *envTestHelper) restoreEnvVar(key, oldVal string) {
-	var err error
-	if oldVal == "" {
-		err = os.Unsetenv(key)
-	} else {
-		err = os.Setenv(key, oldVal)
-	}
-
-	if err != nil {
-		h.t.Logf("Failed to restore env var: %v", err)
-	}
-}
-
-// configTestCase represents a test case for config loading.
-type configTestCase struct {
-	validate func(*testing.T, *config.Config)
-	name     string
-	content  string
-	wantErr  bool
-}
-
-// newConfigTestCase creates a new config test case.
-func newConfigTestCase(
-	name, content string,
-	wantErr bool,
-	validate func(*testing.T, *config.Config),
-) configTestCase {
-	return configTestCase{
-		name:     name,
-		content:  content,
-		wantErr:  wantErr,
-		validate: validate,
-	}
-}
-
-// runConfigLoadTest executes a config load test case.
-func (tc configTestCase) runConfigLoadTest(t *testing.T) {
-	t.Helper()
-
-	helper := newTestHelper(t)
-
-	tmpDir, cleanup := helper.createTempDir("config-test")
-	defer cleanup()
-
-	configPath := helper.writeConfigFile(tmpDir, tc.content)
-
-	cfg, err := config.Load(configPath)
-	if (err != nil) != tc.wantErr {
-		t.Errorf("Load() error = %v, wantErr %v", err, tc.wantErr)
-
-		return
-	}
-
-	if !tc.wantErr && tc.validate != nil {
-		tc.validate(t, cfg)
-	}
-}
-
-// Helper function to create a base test config.
-func createBaseTestConfig() config.Config {
-	return config.Config{
-		Project: struct {
-			Name        string `toml:"name"`
-			Version     string `toml:"version"`
-			Description string `toml:"description"`
-		}{Name: "", Version: "", Description: ""},
-		Paths: struct {
-			InputDir  string `toml:"input_dir"`
-			OutputDir string `toml:"output_dir"`
-		}{InputDir: "", OutputDir: ""},
-		Prompts: struct {
-			Augmentation string `toml:"augmentation"`
-		}{Augmentation: ""},
-		Augmentation: struct {
-			Type             string `toml:"type"`
-			CustomPrompt     string `toml:"custom_prompt"`
-			UsePromptBuilder bool   `toml:"use_prompt_builder"`
-		}{Type: "", CustomPrompt: "", UsePromptBuilder: false},
-		Logging: struct {
-			Level                string `toml:"level"`
-			Dir                  string `toml:"dir"`
-			EnableFileLogging    bool   `toml:"enable_file_logging"`
-			EnableConsoleLogging bool   `toml:"enable_console_logging"`
-		}{Level: "", Dir: "", EnableFileLogging: false, EnableConsoleLogging: false},
-		Tesseract: struct {
-			Language       string `toml:"language"`
-			OEM            int    `toml:"oem"`
-			PSM            int    `toml:"psm"`
-			DPI            int    `toml:"dpi"`
-			TimeoutSeconds int    `toml:"timeout_seconds"`
-		}{Language: "", OEM: 0, PSM: 0, DPI: 0, TimeoutSeconds: 0},
-		Gemini: struct {
-			APIKeyVariable    string   `toml:"api_key_variable"`
-			Models            []string `toml:"models"`
-			MaxRetries        int      `toml:"max_retries"`
-			RetryDelaySeconds int      `toml:"retry_delay_seconds"`
-			TimeoutSeconds    int      `toml:"timeout_seconds"`
-			Temperature       float64  `toml:"temperature"`
-			TopK              int      `toml:"top_k"`
-			TopP              float64  `toml:"top_p"`
-			MaxTokens         int      `toml:"max_tokens"`
-		}{APIKeyVariable: "", Models: nil, MaxRetries: 0, RetryDelaySeconds: 0, TimeoutSeconds: 0, Temperature: 0.0, TopK: 0, TopP: 0.0, MaxTokens: 0},
-		Settings: struct {
-			Workers            int  `toml:"workers"`
-			TimeoutSeconds     int  `toml:"timeout_seconds"`
-			EnableAugmentation bool `toml:"enable_augmentation"`
-			SkipExisting       bool `toml:"skip_existing"`
-		}{Workers: 0, TimeoutSeconds: 0, EnableAugmentation: false, SkipExisting: false},
-	}
-}
-
-// Helper to create test config with API key.
-func createConfigWithAPIKey(apiKeyVar string) config.Config {
-	cfg := createBaseTestConfig()
-
-	cfg.Gemini.APIKeyVariable = apiKeyVar
-
-	return cfg
-}
-
-// Helper to create test config for directory tests.
-func createConfigWithPaths(inputDir, outputDir, logDir string) config.Config {
-	cfg := createBaseTestConfig()
-
-	cfg.Paths.InputDir = inputDir
-	cfg.Paths.OutputDir = outputDir
-	cfg.Logging.Dir = logDir
-
-	return cfg
-}
-
-// createValidConfigContent returns a valid TOML config string.
-func createValidConfigContent() string {
-	return `[paths]
-input_dir = "./input"
-output_dir = "./output"`
-}
-
-// createConfigContentMissingInputDir returns TOML config missing input_dir.
-func createConfigContentMissingInputDir() string {
-	return `[paths]
-output_dir = "./output"`
-}
-
-// createConfigContentMissingOutputDir returns TOML config missing output_dir.
-func createConfigContentMissingOutputDir() string {
-	return `[paths]
-input_dir = "./input"`
-}
-
-func TestConfig_Load(t *testing.T) {
-	tests := []configTestCase{
-		newConfigTestCase(
-			"valid config with all settings",
-			createValidConfigWithAllSettings(),
-			false,
-			validateCompleteConfig,
-		),
-		newConfigTestCase(
-			"missing required paths",
-			`[project]
-name = "test-service"`,
-			true,
-			nil,
-		),
-		newConfigTestCase(
-			"invalid TOML",
-			`[project
-name = "invalid"`,
-			true,
-			nil,
-		),
-	}
-
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			testCase.runConfigLoadTest(t)
-		})
-	}
-}
-
-func createValidConfigWithAllSettings() string {
-	return `[project]
-name = "test-service"
-version = "1.0.0"
-
-[paths]
-input_dir = "./input"
-output_dir = "./output"
-
-[settings]
-workers = 8
-enable_augmentation = true
-
-[tesseract]
-language = "eng+equ"
-oem = 3
-psm = 3
-dpi = 300
-
-[gemini]
-api_key_variable = "TEST_API_KEY"
-models = ["gemini-2.5-flash-lite"]
-
-[logging]
-level = "info"
-dir = "./logs"
-`
-}
-
-func validateCompleteConfig(t *testing.T, cfg *config.Config) {
-	t.Helper()
-
-	if cfg.Project.Name != "test-service" {
-		t.Errorf("Project.Name = %s, want test-service", cfg.Project.Name)
-	}
-
-	if cfg.Settings.Workers != 8 {
-		t.Errorf("Settings.Workers = %d, want 8", cfg.Settings.Workers)
-	}
-
-	if !cfg.Settings.EnableAugmentation {
-		t.Error("Settings.EnableAugmentation = false, want true")
-	}
-}
-
-func TestConfig_validate(t *testing.T) {
-	tests := []configTestCase{
-		newConfigTestCase(
-			"valid config",
-			createValidConfigContent(),
-			false,
-			nil,
-		),
-		newConfigTestCase(
-			"missing input dir",
-			createConfigContentMissingInputDir(),
-			true,
-			nil,
-		),
-		newConfigTestCase(
-			"missing output dir",
-			createConfigContentMissingOutputDir(),
-			true,
-			nil,
-		),
-	}
-
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			testCase.runConfigLoadTest(t)
-		})
-	}
-}
-
-func TestConfig_GetAPIKey(t *testing.T) {
-	tests := []struct {
-		name   string
-		envKey string
-		envVal string
-		want   string
-		config config.Config
-	}{
-		{
-			name:   "valid API key",
-			config: createConfigWithAPIKey("TEST_API_KEY"),
-			envKey: "TEST_API_KEY",
-			envVal: "secret-key-123",
-			want:   "secret-key-123",
-		},
-		{
-			name:   "empty variable name",
-			config: createConfigWithAPIKey(""),
-			envKey: "",
-			envVal: "",
-			want:   "",
-		},
-	}
-
-	for _, testCase := range tests {
-		t.Run(testCase.name, func(t *testing.T) {
-			t.Parallel()
-			runGetAPIKeyTest(t, testCase)
-		})
-	}
-}
-
-func runGetAPIKeyTest(t *testing.T, testCase struct {
-	name   string
-	envKey string
-	envVal string
-	want   string
-	config config.Config
-},
-) {
-	t.Helper()
-
-	if testCase.envKey != "" && testCase.envVal != "" {
-		runGetAPIKeyTestWithEnv(t, testCase)
-	} else {
-		runGetAPIKeyTestDirect(t, testCase)
-	}
-}
-
-func runGetAPIKeyTestWithEnv(t *testing.T, testCase struct {
-	name   string
-	envKey string
-	envVal string
-	want   string
-	config config.Config
-},
-) {
-	t.Helper()
-
-	envHelper := newEnvTestHelper(t)
-	envHelper.withEnvVar(testCase.envKey, testCase.envVal, func() {
-		assertGetAPIKeyResult(t, testCase.config, testCase.want)
-	})
-}
-
-func runGetAPIKeyTestDirect(t *testing.T, testCase struct {
-	name   string
-	envKey string
-	envVal string
-	want   string
-	config config.Config
-},
-) {
-	t.Helper()
-	assertGetAPIKeyResult(t, testCase.config, testCase.want)
-}
-
-func assertGetAPIKeyResult(t *testing.T, cfg config.Config, want string) {
-	t.Helper()
-
-	if got := cfg.GetAPIKey(); got != want {
-		t.Errorf("Config.GetAPIKey() = %v, want %v", got, want)
-	}
-}
-
-func TestConfig_EnsureDirectories(t *testing.T) {
-	t.Parallel()
-
-	helper := newTestHelper(t)
-
-	tmpDir, cleanup := helper.createTempDir("config-ensure-test")
-	defer cleanup()
-
-	cfg := createConfigWithPaths(
-		filepath.Join(tmpDir, "input"),
-		filepath.Join(tmpDir, "output"),
-		filepath.Join(tmpDir, "logs"),
+	applyCommandLineOverrides(
+		cfg,
+		flags.inputDirFlag,
+		flags.outputDirFlag,
+		flags.workersFlag,
+		flags.noAugmentFlag,
+		flags.promptFlag,
+		flags.augmentationTypeFlag,
 	)
 
-	err := cfg.EnsureDirectories()
+	ctx := setupApplicationContext(loggerInstance)
+	processingPipeline := createPipeline(cfg, loggerInstance)
+
+	runProcessing(ctx, processingPipeline, cfg, flags.singleFileFlag, loggerInstance)
+}
+
+// commandLineFlags holds all command line flag values.
+type commandLineFlags struct {
+	configPathFlag       string
+	inputDirFlag         string
+	outputDirFlag        string
+	singleFileFlag       string
+	promptFlag           string
+	augmentationTypeFlag string
+	workersFlag          int
+	noAugmentFlag        bool
+	versionFlag          bool
+}
+
+// parseCommandLineFlags parses and returns command line flags.
+func parseCommandLineFlags() commandLineFlags {
+	var flags commandLineFlags
+
+	flag.StringVar(
+		&flags.configPathFlag,
+		"config",
+		"",
+		"Path to configuration file (default: find project.toml)",
+	)
+	flag.StringVar(
+		&flags.inputDirFlag,
+		"input",
+		"",
+		"Input directory containing PNG files (overrides config)",
+	)
+	flag.StringVar(
+		&flags.outputDirFlag,
+		"output",
+		"",
+		"Output directory for text files (overrides config)",
+	)
+	flag.StringVar(
+		&flags.singleFileFlag,
+		"file",
+		"",
+		"Process single PNG file instead of directory",
+	)
+	flag.IntVar(
+		&flags.workersFlag,
+		"workers",
+		0,
+		"Number of worker goroutines (overrides config)",
+	)
+	flag.BoolVar(
+		&flags.noAugmentFlag,
+		"no-augment",
+		false,
+		"Disable AI text augmentation",
+	)
+	flag.StringVar(
+		&flags.promptFlag,
+		"prompt",
+		"",
+		"Custom prompt for AI text augmentation (overrides config)",
+	)
+	flag.StringVar(
+		&flags.augmentationTypeFlag,
+		"augmentation-type",
+		"",
+		"Augmentation type: 'commentary' or 'summary' (overrides config)",
+	)
+	flag.BoolVar(&flags.versionFlag, "version", false, "Print version and exit")
+
+	flag.Parse()
+
+	return flags
+}
+
+// printVersionAndExit prints version information and exits.
+func printVersionAndExit() {
+	fmt.Println("png-to-text-service version 1.0.0")
+	os.Exit(0)
+}
+
+// initializeApplication loads config and initializes logger.
+func initializeApplication(configPath string) (*config.Config, *logger.Logger) {
+	cfg, err := loadConfiguration(configPath)
 	if err != nil {
-		t.Errorf("Config.EnsureDirectories() error = %v", err)
+		fatalf("Failed to load configuration: %v", err)
 	}
 
-	// Check that directories were created using helper
-	dirs := []string{cfg.Paths.InputDir, cfg.Paths.OutputDir, cfg.Logging.Dir}
-	for _, dir := range dirs {
-		helper.validateDirectoryExists(dir)
+	loggerInstance, err := initializeLogger(cfg)
+	if err != nil {
+		fatalf("Failed to initialize logger: %v", err)
+	}
+
+	loggerInstance.Info("PNG-to-text-service starting up - version 1.0.0")
+
+	return cfg, loggerInstance
+}
+
+// closeLogger safely closes the logger instance.
+func closeLogger(loggerInstance *logger.Logger) {
+	closeErr := loggerInstance.Close()
+	if closeErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to close logger: %v\n", closeErr)
 	}
 }
 
-func TestConfig_GetLogFilePath(t *testing.T) {
-	t.Parallel()
+// setupApplicationContext creates context and signal handling.
+func setupApplicationContext(loggerInstance *logger.Logger) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	setupSignalHandling(cancel, loggerInstance)
 
-	cfg := createConfigWithPaths("", "", "/tmp/logs")
+	return ctx
+}
 
-	filename := "test.log"
-	expected := "/tmp/logs/test.log"
+// createPipeline creates and configures the processing pipeline.
+func createPipeline(
+	cfg *config.Config,
+	loggerInstance *logger.Logger,
+) *pipeline.Pipeline {
+	dirErr := cfg.EnsureDirectories()
+	if dirErr != nil {
+		fatalf("Failed to ensure directories: %v", dirErr)
+	}
 
-	if got := cfg.GetLogFilePath(filename); got != expected {
-		t.Errorf("Config.GetLogFilePath() = %v, want %v", got, expected)
+	processingPipeline, err := pipeline.NewPipeline(cfg, loggerInstance)
+	if err != nil {
+		fatalf("Failed to create pipeline: %v", err)
+	}
+
+	return processingPipeline
+}
+
+// runProcessing executes the main processing logic.
+func runProcessing(
+	ctx context.Context,
+	processingPipeline *pipeline.Pipeline,
+	cfg *config.Config,
+	singleFile string,
+	loggerInstance *logger.Logger,
+) {
+	var err error
+
+	if singleFile != "" {
+		err = processSingleFile(
+			ctx,
+			processingPipeline,
+			singleFile,
+			cfg.Paths.OutputDir,
+			loggerInstance,
+		)
+	} else {
+		err = processDirectory(ctx, processingPipeline, cfg.Paths.InputDir, cfg.Paths.OutputDir, loggerInstance)
+	}
+
+	if err != nil {
+		loggerInstance.Error("Processing failed: %v", err)
+		os.Exit(1)
+	}
+
+	loggerInstance.Success("PNG-to-text-service completed successfully")
+}
+
+// loadConfiguration loads the configuration from the specified path or finds it
+// automatically.
+func loadConfiguration(configPath string) (*config.Config, error) {
+	finalConfigPath, err := resolveConfigPath(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := config.Load(finalConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"load configuration from %s: %w",
+			finalConfigPath,
+			err,
+		)
+	}
+
+	return cfg, nil
+}
+
+// resolveConfigPath determines the final configuration file path.
+func resolveConfigPath(configPath string) (string, error) {
+	if configPath != "" {
+		return configPath, nil
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("get working directory: %w", err)
+	}
+
+	_, foundConfigPath, err := config.FindProjectRoot(wd)
+	if err != nil {
+		return "", fmt.Errorf("find project configuration: %w", err)
+	}
+
+	return foundConfigPath, nil
+}
+
+// initializeLogger creates and configures the logger instance.
+func initializeLogger(cfg *config.Config) (*logger.Logger, error) {
+	logFileName := fmt.Sprintf(
+		"png-to-text-service_%s.log",
+		time.Now().Format("2006-01-02_15-04-05"),
+	)
+
+	loggerInstance, err := logger.New(cfg.Logging.Dir, logFileName)
+	if err != nil {
+		return nil, fmt.Errorf("create logger: %w", err)
+	}
+
+	return loggerInstance, nil
+}
+
+// applyCommandLineOverrides applies command line flag overrides to the configuration.
+func applyCommandLineOverrides(
+	cfg *config.Config,
+	inputDir, outputDir string,
+	workers int,
+	noAugment bool,
+	customPrompt, augmentationType string,
+) {
+	applyPathOverrides(cfg, inputDir, outputDir)
+	applySettingsOverrides(cfg, workers, noAugment)
+	applyAugmentationOverrides(cfg, customPrompt, augmentationType)
+}
+
+// applyPathOverrides applies path-related command line overrides.
+func applyPathOverrides(cfg *config.Config, inputDir, outputDir string) {
+	if inputDir != "" {
+		cfg.Paths.InputDir = inputDir
+	}
+
+	if outputDir != "" {
+		cfg.Paths.OutputDir = outputDir
 	}
 }
 
-func BenchmarkConfig_Load(b *testing.B) {
-	configPath := setupBenchmarkConfigFile(b)
-	defer cleanupBenchmarkConfigFile(b, configPath)
+// applySettingsOverrides applies settings-related command line overrides.
+func applySettingsOverrides(cfg *config.Config, workers int, noAugment bool) {
+	if workers > 0 {
+		cfg.Settings.Workers = workers
+	}
 
-	b.ResetTimer()
+	if noAugment {
+		cfg.Settings.EnableAugmentation = false
+	}
+}
 
-	for range b.N {
-		if _, err := config.Load(configPath); err != nil {
-			b.Errorf("config.Load() error = %v", err)
+// applyAugmentationOverrides applies augmentation-related command line overrides.
+func applyAugmentationOverrides(
+	cfg *config.Config,
+	customPrompt, augmentationType string,
+) {
+	if customPrompt != "" {
+		cfg.Augmentation.CustomPrompt = customPrompt
+	}
+
+	if augmentationType != "" {
+		validateAndSetAugmentationType(cfg, augmentationType)
+	}
+}
+
+// validateAndSetAugmentationType validates and sets the augmentation type.
+func validateAndSetAugmentationType(cfg *config.Config, augmentationType string) {
+	if augmentationType == "commentary" || augmentationType == "summary" {
+		cfg.Augmentation.Type = augmentationType
+	} else {
+		fatalf("Invalid augmentation type: %s. Must be 'commentary' or 'summary'", augmentationType)
+	}
+}
+
+// setupSignalHandling configures graceful shutdown on SIGINT and SIGTERM.
+func setupSignalHandling(cancel context.CancelFunc, log *logger.Logger) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigChan
+		log.Info("Received signal %v, initiating graceful shutdown...", sig)
+		cancel()
+	}()
+}
+
+// processSingleFile processes a single PNG file.
+func processSingleFile(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	pngFile, outputDir string,
+	log *logger.Logger,
+) error {
+	if !filepath.IsAbs(pngFile) {
+		abs, err := filepath.Abs(pngFile)
+		if err != nil {
+			return fmt.Errorf(
+				"resolve absolute path for %s: %w",
+				pngFile,
+				err,
+			)
 		}
+
+		pngFile = abs
 	}
+
+	// Generate output path
+	baseName := filepath.Base(pngFile)
+	txtName := baseName[:len(baseName)-len(filepath.Ext(baseName))] + ".txt"
+	outputPath := filepath.Join(outputDir, txtName)
+
+	log.Info("Processing single file: %s -> %s", pngFile, outputPath)
+
+	return p.ProcessSingle(ctx, pngFile, outputPath)
 }
 
-func setupBenchmarkConfigFile(b *testing.B) string {
-	b.Helper()
-
-	tmpDir, err := os.MkdirTemp("", "config-bench")
-	if err != nil {
-		b.Fatalf("Failed to create temp dir: %v", err)
+// processDirectory processes all PNG files in a directory.
+func processDirectory(
+	ctx context.Context,
+	p *pipeline.Pipeline,
+	inputDir, outputDir string,
+	log *logger.Logger,
+) error {
+	if inputDir == "" || outputDir == "" {
+		return ErrDirectoriesRequired
 	}
 
-	configPath := filepath.Join(tmpDir, "project.toml")
-	if err := os.WriteFile(configPath, []byte(createValidConfigContent()), 0o600); err != nil {
-		b.Fatalf("Failed to write config file: %v", err)
+	// Validate input directory exists
+	if _, err := os.Stat(inputDir); err != nil {
+		return fmt.Errorf("input directory %s: %w", inputDir, err)
 	}
 
-	return configPath
+	log.Info("Processing directory: %s -> %s", inputDir, outputDir)
+
+	return p.ProcessDirectory(ctx, inputDir, outputDir)
 }
 
-func cleanupBenchmarkConfigFile(b *testing.B, configPath string) {
-	b.Helper()
-
-	tmpDir := filepath.Dir(configPath)
-
-	err := os.RemoveAll(tmpDir)
-	if err != nil {
-		b.Logf("Failed to remove temp dir: %v", err)
-	}
+// fatalf prints an error message and exits with code 1.
+func fatalf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "ERROR: "+format+"\n", args...)
+	os.Exit(1)
 }

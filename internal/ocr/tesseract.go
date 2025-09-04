@@ -1,3 +1,4 @@
+// ./internal/ocr/tesseract.go
 // Package ocr provides OCR functionality using Tesseract.
 package ocr
 
@@ -39,10 +40,10 @@ type Processor struct {
 }
 
 // NewProcessor creates a new Tesseract OCR processor.
-func NewProcessor(config TesseractConfig, logger *logger.Logger) *Processor {
+func NewProcessor(config TesseractConfig, log *logger.Logger) *Processor {
 	return &Processor{
 		config: config,
-		logger: logger,
+		logger: log,
 	}
 }
 

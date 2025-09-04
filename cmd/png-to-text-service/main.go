@@ -1,3 +1,4 @@
+// ./cmd/png-to-text-service/main.go
 // PNG-to-text-service: Unified PNG → OCR → AI Augmentation pipeline
 package main
 
@@ -318,13 +319,13 @@ func validateAndSetAugmentationType(cfg *config.Config, augmentationType string)
 }
 
 // setupSignalHandling configures graceful shutdown on SIGINT and SIGTERM.
-func setupSignalHandling(cancel context.CancelFunc, logger *logger.Logger) {
+func setupSignalHandling(cancel context.CancelFunc, log *logger.Logger) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		sig := <-sigChan
-		logger.Info("Received signal %v, initiating graceful shutdown...", sig)
+		log.Info("Received signal %v, initiating graceful shutdown...", sig)
 		cancel()
 	}()
 }
@@ -332,9 +333,9 @@ func setupSignalHandling(cancel context.CancelFunc, logger *logger.Logger) {
 // processSingleFile processes a single PNG file.
 func processSingleFile(
 	ctx context.Context,
-	pipeline *pipeline.Pipeline,
+	p *pipeline.Pipeline,
 	pngFile, outputDir string,
-	logger *logger.Logger,
+	log *logger.Logger,
 ) error {
 	if !filepath.IsAbs(pngFile) {
 		abs, err := filepath.Abs(pngFile)
@@ -354,17 +355,17 @@ func processSingleFile(
 	txtName := baseName[:len(baseName)-len(filepath.Ext(baseName))] + ".txt"
 	outputPath := filepath.Join(outputDir, txtName)
 
-	logger.Info("Processing single file: %s -> %s", pngFile, outputPath)
+	log.Info("Processing single file: %s -> %s", pngFile, outputPath)
 
-	return pipeline.ProcessSingle(ctx, pngFile, outputPath)
+	return p.ProcessSingle(ctx, pngFile, outputPath)
 }
 
 // processDirectory processes all PNG files in a directory.
 func processDirectory(
 	ctx context.Context,
-	pipeline *pipeline.Pipeline,
+	p *pipeline.Pipeline,
 	inputDir, outputDir string,
-	logger *logger.Logger,
+	log *logger.Logger,
 ) error {
 	if inputDir == "" || outputDir == "" {
 		return ErrDirectoriesRequired
@@ -375,9 +376,9 @@ func processDirectory(
 		return fmt.Errorf("input directory %s: %w", inputDir, err)
 	}
 
-	logger.Info("Processing directory: %s -> %s", inputDir, outputDir)
+	log.Info("Processing directory: %s -> %s", inputDir, outputDir)
 
-	return pipeline.ProcessDirectory(ctx, inputDir, outputDir)
+	return p.ProcessDirectory(ctx, inputDir, outputDir)
 }
 
 // fatalf prints an error message and exits with code 1.

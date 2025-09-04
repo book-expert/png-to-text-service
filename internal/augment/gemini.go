@@ -1,3 +1,4 @@
+// ./internal/augment/gemini.go
 // Package augment provides AI-powered text augmentation using Gemini models.
 package augment
 
@@ -22,7 +23,8 @@ var (
 	ErrImagePathRequired = errors.New("image path is required")
 	ErrEmptyResponse     = errors.New("empty response")
 	ErrNoCandidates      = errors.New("no candidates in response")
-	ErrGeminiAPIError    = errors.New("Gemini API error")
+	ErrGeminiAPIError    = errors.New("gemini API error")
+	ErrMaxRetries        = errors.New("max retries exceeded")
 )
 
 // AugmentationType defines the type of augmentation to perform.
@@ -117,16 +119,16 @@ type geminiResponse struct {
 }
 
 // NewGeminiProcessor creates a new Gemini-based text augmentation processor.
-func NewGeminiProcessor(config GeminiConfig, logger *logger.Logger) *GeminiProcessor {
+func NewGeminiProcessor(config *GeminiConfig, log *logger.Logger) *GeminiProcessor {
 	return &GeminiProcessor{
-		config: config,
+		config: *config,
 		httpClient: &http.Client{
 			Transport:     nil,
 			CheckRedirect: nil,
 			Jar:           nil,
 			Timeout:       time.Duration(config.TimeoutSeconds) * time.Second,
 		},
-		logger: logger,
+		logger: log,
 	}
 }
 
@@ -146,6 +148,30 @@ func (g *GeminiProcessor) AugmentText(
 	return g.AugmentTextWithOptions(ctx, ocrText, imagePath, opts)
 }
 
+// AugmentTextWithOptions enhances OCR text using image context and AI models with
+// specific options.
+func (g *GeminiProcessor) AugmentTextWithOptions(
+	ctx context.Context,
+	ocrText, imagePath string,
+	opts *AugmentationOptions,
+) (string, error) {
+	if err := g.validateInputs(ocrText, imagePath); err != nil {
+		return "", fmt.Errorf("validate inputs: %w", err)
+	}
+
+	imageData, mimeType, err := g.prepareImageData(imagePath)
+	if err != nil {
+		return "", err
+	}
+
+	prompt, err := g.buildPromptWithOptions(ocrText, opts)
+	if err != nil {
+		return "", fmt.Errorf("build prompt: %w", err)
+	}
+
+	return g.tryAllModels(ctx, prompt, imageData, mimeType)
+}
+
 // validateInputs checks that the required inputs are valid.
 func (g *GeminiProcessor) validateInputs(ocrText, imagePath string) error {
 	if imagePath == "" {
@@ -160,16 +186,18 @@ func (g *GeminiProcessor) validateInputs(ocrText, imagePath string) error {
 }
 
 // readAndEncodeImage reads an image file and returns base64 encoded data with MIME type.
-func (g *GeminiProcessor) readAndEncodeImage(imagePath string) (string, string, error) {
+func (g *GeminiProcessor) readAndEncodeImage(
+	imagePath string,
+) (encodedData, mimeType string, err error) {
 	imageBytes, err := os.ReadFile(imagePath)
 	if err != nil {
 		return "", "", fmt.Errorf("read image file: %w", err)
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(imageBytes)
-	mimeType := g.detectImageMimeType(imagePath)
+	detectedMimeType := g.detectImageMimeType(imagePath)
 
-	return encoded, mimeType, nil
+	return encoded, detectedMimeType, nil
 }
 
 // detectImageMimeType returns appropriate MIME type based on file extension.
@@ -311,7 +339,7 @@ func (g *GeminiProcessor) tryModelWithRetries(
 		}
 	}
 
-	return "", fmt.Errorf("model %s: max retries exceeded", model)
+	return "", ErrMaxRetries
 }
 
 // attemptAPICall makes a single API attempt and handles retry logic.
@@ -577,43 +605,11 @@ func (g *GeminiProcessor) appendTextPart(builder *strings.Builder, text string) 
 	builder.WriteString(text)
 }
 
-// getCommentaryPrompt returns the default commentary prompt.
-func getCommentaryPrompt() string {
-	return "You are a PhD-level technical narrator specializing in accessibility commentary. Integrate descriptive commentary derived from the page image into the OCR text, producing a coherent narration for text-to-speech. Focus on describing people, environment, figures, diagrams, and visual elements like movie accessibility features. Maintain technical accuracy, describe visual content as natural prose inserted near relevant context, avoid markdown formatting, and output continuous paragraphs."
-}
-
-// getSummaryPrompt returns the default summary prompt.
-func getSummaryPrompt() string {
-	return "You are a PhD-level technical summarizer. Enhance the OCR text by adding a comprehensive summary at the end of the content. The summary should capture key points, main concepts, and important details from both the OCR text and visual elements in the image. Maintain technical accuracy, avoid markdown formatting, and structure the output as: [original OCR text] followed by [SUMMARY: comprehensive summary paragraph]."
-}
-
-// AugmentTextWithOptions enhances OCR text using image context and AI models with
-// specific options.
-func (g *GeminiProcessor) AugmentTextWithOptions(
-	ctx context.Context,
-	ocrText, imagePath string,
-	opts *AugmentationOptions,
-) (string, error) {
-	if err := g.validateInputs(ocrText, imagePath); err != nil {
-		return "", fmt.Errorf("validate inputs: %w", err)
-	}
-
-	imageData, mimeType, err := g.prepareImageData(imagePath)
-	if err != nil {
-		return "", err
-	}
-
-	prompt, err := g.buildPromptWithOptions(ocrText, opts)
-	if err != nil {
-		return "", fmt.Errorf("build prompt: %w", err)
-	}
-
-	return g.tryAllModels(ctx, prompt, imageData, mimeType)
-}
-
 // prepareImageData reads and encodes the image for API consumption.
-func (g *GeminiProcessor) prepareImageData(imagePath string) (string, string, error) {
-	imageData, mimeType, err := g.readAndEncodeImage(imagePath)
+func (g *GeminiProcessor) prepareImageData(
+	imagePath string,
+) (imageData, mimeType string, err error) {
+	imageData, mimeType, err = g.readAndEncodeImage(imagePath)
 	if err != nil {
 		return "", "", fmt.Errorf("read image: %w", err)
 	}
@@ -646,4 +642,14 @@ func (g *GeminiProcessor) tryAllModels(
 	}
 
 	return "", fmt.Errorf("all models failed, last error: %w", lastErr)
+}
+
+// getCommentaryPrompt returns the default commentary prompt.
+func getCommentaryPrompt() string {
+	return "You are a PhD-level technical narrator specializing in accessibility commentary. Integrate descriptive commentary derived from the page image into the OCR text, producing a coherent narration for text-to-speech. Focus on describing people, environment, figures, diagrams, and visual elements like movie accessibility features. Maintain technical accuracy, describe visual content as natural prose inserted near relevant context, avoid markdown formatting, and output continuous paragraphs."
+}
+
+// getSummaryPrompt returns the default summary prompt.
+func getSummaryPrompt() string {
+	return "You are a PhD-level technical summarizer. Enhance the OCR text by adding a comprehensive summary at the end of the content. The summary should capture key points, main concepts, and important details from both the OCR text and visual elements in the image. Maintain technical accuracy, avoid markdown formatting, and structure the output as: [original OCR text] followed by [SUMMARY: comprehensive summary paragraph]."
 }
