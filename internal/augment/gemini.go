@@ -283,7 +283,7 @@ func (g *GeminiProcessor) buildPromptWithBuilder(
 		augmentationType = opts.Type
 	}
 
-	// Use the simpler prompt building approach
+	// Use the simpler prompt building approach for now
 	return g.buildPromptForType(ocrText, augmentationType), nil
 }
 
