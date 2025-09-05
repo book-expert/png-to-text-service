@@ -1,57 +1,37 @@
 # PNG-to-Text Service
 
-A high-performance OCR service that extracts text from PNG images using Tesseract OCR, with optional AI-powered text enhancement through Google's Gemini models.
+OCR service that extracts text from PNG images using Tesseract, with optional AI enhancement. Uses Google Gemini as reference implementation but can be adapted for other AI providers (Groq, OpenAI, etc.).
 
-## What It Does
+## Overview
 
-This service processes PNG images to extract readable text through optical character recognition (OCR). It provides:
+Processes PNG files to extract text, add AI-generated commentary/summary, and provide final merged output:
 
-- **Tesseract OCR Integration**: Reliable text extraction from PNG images
-- **AI Text Enhancement**: Optional post-processing using Google Gemini models for improved accuracy and formatting
-- **Batch Processing**: Efficient processing of multiple images in parallel
-- **Configurable Pipeline**: Flexible configuration for different use cases and quality requirements
+1. **Extract**: Tesseract OCR extracts raw text, cleaning removes artifacts
+2. **Augment**: Multimodal AI models add commentary or summary using both text and image
+3. **Merge**: Combines original OCR text with AI augmentation for final output
 
-## Why Use This Service
+## Installation
 
-- **Production Ready**: Built with comprehensive error handling, logging, and configuration management
-- **Scalable**: Parallel processing architecture handles large image batches efficiently
-- **Quality Focused**: AI enhancement capabilities improve OCR accuracy for challenging images
-- **Maintainable**: Clean architecture with well-defined component boundaries and comprehensive test coverage
+### Prerequisites
+- Go 1.25+
+- Tesseract OCR in PATH
+- AI provider API key (if using enhancement)
 
-## How It Works
-
-The service follows a three-stage pipeline architecture:
-
-1. **OCR Stage**: Tesseract processes PNG images to extract raw text
-2. **Cleaning Stage**: Text undergoes normalization and cleanup (removes OCR artifacts, fixes spacing, handles ligatures)
-3. **Enhancement Stage** (Optional): Gemini AI models improve text quality and add contextual understanding
-
-## How To Use
-
-### Installation
-
+### Build
 ```bash
-# Clone the repository
 git clone <repository-url>
 cd png-to-text-service
-
-# Build the service
 make build
 ```
 
-### Configuration
+## Configuration
 
-Create a `project.toml` configuration file:
+Create `project.toml`:
 
 ```toml
-[project]
-name = "PNG OCR Service"
-version = "1.0.0"
-description = "OCR service for PNG images"
-
 [paths]
-input_dir = "/path/to/input/images"
-output_dir = "/path/to/output/text"
+input_dir = "/path/to/input"
+output_dir = "/path/to/output"
 
 [tesseract]
 language = "eng"
@@ -62,106 +42,86 @@ timeout_seconds = 120
 workers = 4
 enable_augmentation = false
 
-# Optional: AI Enhancement
 [augmentation]
-type = "commentary"
-use_prompt_builder = false
+type = "commentary"  # or "summary"
 
 [gemini]
 api_key_variable = "GEMINI_API_KEY"
 models = ["gemini-1.5-flash"]
-temperature = 0.7
-max_tokens = 8192
+# Modify internal/augment/ for other providers (Groq, OpenAI, etc.)
 ```
 
-### Basic Usage
+## Usage
 
 ```bash
-# Process all PNG files in a directory
+# Process directory
 ./bin/png-to-text-service -input ./images -output ./text
 
-# Process a single PNG file
-./bin/png-to-text-service -file ./image.png -output ./output
+# Single file
+./bin/png-to-text-service -file image.png -output output.txt
 
-# Disable AI augmentation (faster, no API key required)
+# Without AI enhancement
 ./bin/png-to-text-service -input ./images -output ./text -no-augment
 
-# Configure parallel processing
+# Custom workers
 ./bin/png-to-text-service -input ./images -output ./text -workers 8
-```
-
-### Environment Variables
-
-```bash
-# Required for AI enhancement
-export GEMINI_API_KEY="your-gemini-api-key"
-
-# Optional: Custom configuration path
-export CONFIG_PATH="/path/to/project.toml"
 ```
 
 ## Command Line Options
 
-- `-config string`: Path to configuration file
-- `-input string`: Input directory (overrides config)
-- `-output string`: Output directory (overrides config)  
-- `-file string`: Process single PNG file
-- `-workers int`: Number of worker goroutines (overrides config)
-- `-no-augment`: Disable AI text augmentation
-- `-version`: Print version and exit
+- `-config string`: Configuration file path
+- `-input string`: Input directory
+- `-output string`: Output directory
+- `-file string`: Single PNG file
+- `-workers int`: Number of parallel workers
+- `-no-augment`: Disable AI enhancement
+- `-version`: Show version
 
-## Architecture Overview
+## Environment Variables
 
-The service is organized into focused, single-responsibility modules:
+- `GEMINI_API_KEY`: API key for Gemini (or adapt for other providers)
+- `CONFIG_PATH`: Override config file location
 
-- **`cmd/`**: Application entry points and command-line interface
-- **`internal/config/`**: Configuration management and validation
-- **`internal/ocr/`**: Tesseract integration and text cleaning
-- **`internal/augment/`**: AI-powered text enhancement
-- **`internal/pipeline/`**: Processing orchestration and workflow management
-
-Each module maintains clear boundaries with well-defined interfaces, ensuring the system remains maintainable and testable as it evolves.
-
-## Quality Assurance
-
-- **Comprehensive Test Coverage**: Unit tests for all core functionality
-- **Static Analysis**: Automated linting and code quality enforcement
-- **Error Handling**: Robust error management with detailed logging
-- **Configuration Validation**: Runtime validation of all configuration parameters
-
-## Development
-
-### Prerequisites
-
-- Go 1.25+
-- Tesseract OCR installed and accessible via PATH
-- Google Cloud API credentials (for AI enhancement features)
-
-### Running Tests
-
-```bash
-# Run all tests
-make test
-
-# Run linting
-make lint
-
-# Check test coverage
-go test -cover ./...
-```
-
-### Project Structure
+## Project Structure
 
 ```
 png-to-text-service/
-├── cmd/png-to-text-service/     # Main application
+├── cmd/png-to-text-service/     # Main executable
 ├── internal/
-│   ├── config/                  # Configuration management
-│   ├── ocr/                     # OCR processing and cleaning
-│   ├── augment/                 # AI text enhancement
+│   ├── config/                  # Configuration loading and validation
+│   ├── ocr/                     # Tesseract integration and text cleaning
+│   ├── augment/                 # AI enhancement (Gemini template)
 │   └── pipeline/                # Processing orchestration
-├── project.toml                 # Configuration file
-└── README.md                    # This file
+└── project.toml                 # Configuration file
 ```
 
-This service prioritizes simplicity, reliability, and maintainability while providing the flexibility needed for diverse OCR processing requirements.
+## Development
+
+```bash
+make test      # Run tests
+make lint      # Run linting
+make build     # Build binary
+```
+
+## Configuration Reference
+
+### Tesseract Settings
+- `language`: OCR language model ("eng", "fra", etc.)
+- `oem`: OCR Engine Mode (0-3, default: 3)
+- `psm`: Page Segmentation Mode (0-13, default: 3)
+- `dpi`: Image resolution (default: 300)
+- `timeout_seconds`: Processing timeout per image
+
+### Augmentation Settings
+- `type`: Enhancement type ("commentary" or "summary")
+
+### AI Provider Settings (Gemini)
+- `models`: Model names to use
+- `temperature`: Creativity level (0.0-1.0)
+- `max_tokens`: Response length limit
+- `max_retries`: Retry attempts on failure
+
+### Processing Settings
+- `workers`: Parallel processing threads
+- `skip_existing`: Skip files with existing output
+- `enable_augmentation`: Enable AI augmentation and merging
