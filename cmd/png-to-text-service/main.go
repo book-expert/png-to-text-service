@@ -18,7 +18,38 @@ import (
 	"github.com/nnikolov3/png-to-text-service/internal/pipeline"
 )
 
-var ErrDirectoriesRequired = errors.New("input and output directories must be specified")
+var (
+	ErrDirectoriesRequired = errors.New(
+		"input and output directories must be specified",
+	)
+	// osGetwd is a package-level variable to allow mocking os.Getwd in tests.
+	//nolint:gochecknoglobals // This global variable is necessary for mocking
+	// OS-level functions in tests.
+	osGetwd = os.Getwd
+	// fatalf is a package-level variable to allow mocking os.Exit calls in tests.
+	//nolint:gochecknoglobals // This global variable is necessary for mocking
+	// process termination in tests.
+	fatalf = func(format string, args ...any) {
+		fmt.Fprintf(os.Stderr, "ERROR: "+format+"\n", args...)
+		os.Exit(1)
+	}
+)
+
+// pipelineProcessor defines the interface for the processing pipeline,
+// allowing for mock implementations in tests.
+type pipelineProcessor interface {
+	ProcessSingle(ctx context.Context, pngFile, outputPath string) error
+	ProcessDirectory(ctx context.Context, inputDir, outputDir string) error
+}
+
+// logProvider defines the interface for the logger, allowing for mock
+// implementations in tests.
+type logProvider interface {
+	Info(format string, args ...any)
+	Error(format string, args ...any)
+	Success(format string, args ...any)
+	Close() error
+}
 
 func main() {
 	flags := parseCommandLineFlags()
@@ -27,7 +58,9 @@ func main() {
 		printVersionAndExit()
 	}
 
-	cfg, loggerInstance := initializeApplication(flags.configPathFlag)
+	cfg, loggerImpl := initializeApplication(flags.configPathFlag)
+
+	var loggerInstance logProvider = loggerImpl
 	defer closeLogger(loggerInstance)
 
 	applyCommandLineOverrides(
@@ -41,7 +74,8 @@ func main() {
 	)
 
 	ctx := setupApplicationContext(loggerInstance)
-	processingPipeline := createPipeline(cfg, loggerInstance)
+
+	var processingPipeline pipelineProcessor = createPipeline(cfg, loggerImpl)
 
 	runProcessing(ctx, processingPipeline, cfg, flags.singleFileFlag, loggerInstance)
 }
@@ -142,7 +176,7 @@ func initializeApplication(configPath string) (*config.Config, *logger.Logger) {
 }
 
 // closeLogger safely closes the logger instance.
-func closeLogger(loggerInstance *logger.Logger) {
+func closeLogger(loggerInstance logProvider) {
 	closeErr := loggerInstance.Close()
 	if closeErr != nil {
 		fmt.Fprintf(os.Stderr, "Failed to close logger: %v\n", closeErr)
@@ -150,7 +184,7 @@ func closeLogger(loggerInstance *logger.Logger) {
 }
 
 // setupApplicationContext creates context and signal handling.
-func setupApplicationContext(loggerInstance *logger.Logger) context.Context {
+func setupApplicationContext(loggerInstance logProvider) context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	setupSignalHandling(cancel, loggerInstance)
 
@@ -178,10 +212,10 @@ func createPipeline(
 // runProcessing executes the main processing logic.
 func runProcessing(
 	ctx context.Context,
-	processingPipeline *pipeline.Pipeline,
+	processingPipeline pipelineProcessor,
 	cfg *config.Config,
 	singleFile string,
-	loggerInstance *logger.Logger,
+	loggerInstance logProvider,
 ) {
 	var err error
 
@@ -231,7 +265,7 @@ func resolveConfigPath(configPath string) (string, error) {
 		return configPath, nil
 	}
 
-	wd, err := os.Getwd()
+	wd, err := osGetwd()
 	if err != nil {
 		return "", fmt.Errorf("get working directory: %w", err)
 	}
@@ -318,7 +352,7 @@ func validateAndSetAugmentationType(cfg *config.Config, augmentationType string)
 }
 
 // setupSignalHandling configures graceful shutdown on SIGINT and SIGTERM.
-func setupSignalHandling(cancel context.CancelFunc, log *logger.Logger) {
+func setupSignalHandling(cancel context.CancelFunc, log logProvider) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -332,9 +366,9 @@ func setupSignalHandling(cancel context.CancelFunc, log *logger.Logger) {
 // processSingleFile processes a single PNG file.
 func processSingleFile(
 	ctx context.Context,
-	processingPipeline *pipeline.Pipeline,
+	processingPipeline pipelineProcessor,
 	pngFile, outputDir string,
-	log *logger.Logger,
+	log logProvider,
 ) error {
 	var err error
 
@@ -371,9 +405,9 @@ func processSingleFile(
 // processDirectory processes all PNG files in a directory.
 func processDirectory(
 	ctx context.Context,
-	processingPipeline *pipeline.Pipeline,
+	processingPipeline pipelineProcessor,
 	inputDir, outputDir string,
-	log *logger.Logger,
+	log logProvider,
 ) error {
 	if inputDir == "" || outputDir == "" {
 		return ErrDirectoriesRequired
@@ -393,10 +427,4 @@ func processDirectory(
 	}
 
 	return nil
-}
-
-// fatalf prints an error message and exits with code 1.
-func fatalf(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "ERROR: "+format+"\n", args...)
-	os.Exit(1)
 }
