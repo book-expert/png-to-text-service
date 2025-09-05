@@ -27,22 +27,62 @@ var (
 	ErrOCRResultEmpty = errors.New("empty OCR result")
 )
 
-// TesseractConfig holds configuration for Tesseract OCR.
+// TesseractConfig holds configuration parameters for Tesseract OCR engine.
+// These parameters directly control Tesseract's behavior and output quality.
 type TesseractConfig struct {
-	Language       string
-	OEM            int
-	PSM            int
-	DPI            int
+	// Language specifies the OCR language model to use (e.g., "eng", "fra", "deu").
+	// Multiple languages can be specified with "+" separator (e.g., "eng+fra").
+	Language string
+
+	// OEM (OCR Engine Mode) controls which OCR engine to use:
+	// 0 = Legacy engine only
+	// 1 = Neural nets LSTM engine only
+	// 2 = Legacy + LSTM engines
+	// 3 = Default (based on what is available)
+	OEM int
+
+	// PSM (Page Segmentation Mode) determines how Tesseract segments the page:
+	// 0 = Orientation and script detection only
+	// 1 = Automatic page segmentation with OSD
+	// 3 = Fully automatic page segmentation (default)
+	// 6 = Uniform block of text
+	// 13 = Raw line. Treat the image as a single text line
+	PSM int
+
+	// DPI specifies the dots per inch of the input image.
+	// Higher DPI generally improves OCR accuracy but increases processing time.
+	// Common values: 150 (fast), 300 (standard), 600 (high quality)
+	DPI int
+
+	// TimeoutSeconds sets the maximum time allowed for OCR processing per image.
+	// Prevents hung processes from blocking the pipeline indefinitely.
 	TimeoutSeconds int
 }
 
-// Processor implements OCR processing using Tesseract.
+// Processor implements OCR processing using the Tesseract OCR engine.
+// It provides a high-level interface for converting PNG images to text
+// with comprehensive error handling, validation, and text cleaning.
+//
+// The processor handles the complete OCR workflow:
+// - PNG file validation and preprocessing
+// - Tesseract process execution with configured parameters
+// - Output text extraction and basic normalization
+// - Error recovery and retry logic for transient failures
+//
+// All processing is performed using external Tesseract binaries,
+// requiring Tesseract to be installed and accessible via PATH.
 type Processor struct {
 	logger *logger.Logger
 	config TesseractConfig
 }
 
-// NewProcessor creates a new Tesseract OCR processor.
+// NewProcessor creates a new Tesseract OCR processor with the specified configuration.
+// The processor is immediately ready for use and will validate configuration
+// parameters during the first OCR operation.
+//
+// The logger is used for detailed processing information, performance metrics,
+// and error reporting. All OCR operations will be logged for troubleshooting
+// and monitoring purposes.
 func NewProcessor(config TesseractConfig, log *logger.Logger) *Processor {
 	return &Processor{
 		config: config,
