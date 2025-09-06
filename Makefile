@@ -20,7 +20,7 @@ deps:
 # Format code
 fmt:
 	@echo "Formatting code..."
-	@gofmt -w .
+	@gofmt -w -s .
 
 # Vet code
 vet:
@@ -30,9 +30,11 @@ vet:
 # Run comprehensive linting
 lint:
 	@echo "Running golangci-lint..."
-	@golangci-lint run --fix ./...
-	@go vet ./...
 	@gofmt -w -s .
+	@go vet ./...
+	@golangci-lint run --fix ./...
+
+
 
 # Run tests
 test:

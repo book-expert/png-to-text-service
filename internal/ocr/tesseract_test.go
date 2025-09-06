@@ -7,8 +7,9 @@ import (
 	"testing"
 
 	"github.com/nnikolov3/logger"
-	"github.com/nnikolov3/png-to-text-service/internal/ocr"
 	"github.com/stretchr/testify/require"
+
+	"github.com/nnikolov3/png-to-text-service/internal/ocr"
 )
 
 func TestNewProcessor(t *testing.T) {

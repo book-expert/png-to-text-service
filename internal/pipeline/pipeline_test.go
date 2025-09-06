@@ -5,9 +5,10 @@ import (
 	"testing"
 
 	"github.com/nnikolov3/logger"
+	"github.com/stretchr/testify/require"
+
 	"github.com/nnikolov3/png-to-text-service/internal/config"
 	"github.com/nnikolov3/png-to-text-service/internal/pipeline"
-	"github.com/stretchr/testify/require"
 )
 
 func createTestConfig() *config.Config {

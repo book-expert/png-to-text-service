@@ -6,9 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nnikolov3/png-to-text-service/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/nnikolov3/png-to-text-service/internal/config"
 )
 
 // Constants for test data and configuration content.

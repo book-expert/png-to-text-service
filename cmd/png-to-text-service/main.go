@@ -1,430 +1,358 @@
 // ./cmd/png-to-text-service/main.go
-// PNG-to-text-service: Unified PNG → OCR → AI Augmentation pipeline
+// PNG-to-text-service: A NATS-driven worker for OCR and AI Augmentation.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nnikolov3/logger"
+
 	"github.com/nnikolov3/png-to-text-service/internal/config"
 	"github.com/nnikolov3/png-to-text-service/internal/pipeline"
 )
 
-var (
-	ErrDirectoriesRequired = errors.New(
-		"input and output directories must be specified",
-	)
-	// osGetwd is a package-level variable to allow mocking os.Getwd in tests.
-	//nolint:gochecknoglobals // This global variable is necessary for mocking
-	// OS-level functions in tests.
-	osGetwd = os.Getwd
-	// fatalf is a package-level variable to allow mocking os.Exit calls in tests.
-	//nolint:gochecknoglobals // This global variable is necessary for mocking
-	// process termination in tests.
-	fatalf = func(format string, args ...any) {
-		fmt.Fprintf(os.Stderr, "ERROR: "+format+"\n", args...)
-		os.Exit(1)
-	}
+const (
+	// appVersion holds the semantic version of the service.
+	appVersion = "1.0.0"
 )
 
-// pipelineProcessor defines the interface for the processing pipeline,
-// allowing for mock implementations in tests.
-type pipelineProcessor interface {
-	ProcessSingle(ctx context.Context, pngFile, outputPath string) error
-	ProcessDirectory(ctx context.Context, inputDir, outputDir string) error
+// Package-level static errors for clear, checkable error conditions.
+var (
+	ErrPngPathEmpty      = errors.New("pngPathInStorage cannot be empty")
+	ErrJobIDEmpty        = errors.New("jobId cannot be empty")
+	ErrInputPngPathEmpty = errors.New("input png path cannot be empty")
+)
+
+// PngCreatedJob represents the incoming job message from the 'png.created' topic.
+type PngCreatedJob struct {
+	PngPathInStorage string `json:"pngPathInStorage"`
+	JobID            string `json:"jobId"`
 }
 
-// logProvider defines the interface for the logger, allowing for mock
-// implementations in tests.
-type logProvider interface {
-	Info(format string, args ...any)
-	Error(format string, args ...any)
-	Success(format string, args ...any)
-	Close() error
+// OcrCompletedJob represents the outgoing job message for the 'ocr.completed' topic.
+type OcrCompletedJob struct {
+	TextPathInStorage string `json:"textPathInStorage"`
+	OriginalPngPath   string `json:"originalPngPath"`
+	JobID             string `json:"jobId"`
 }
 
-func main() {
-	flags := parseCommandLineFlags()
-
-	if flags.versionFlag {
-		printVersionAndExit()
-	}
-
-	cfg, loggerImpl := initializeApplication(flags.configPathFlag)
-
-	var loggerInstance logProvider = loggerImpl
-	defer closeLogger(loggerInstance)
-
-	applyCommandLineOverrides(
-		cfg,
-		flags.inputDirFlag,
-		flags.outputDirFlag,
-		flags.workersFlag,
-		flags.noAugmentFlag,
-		flags.promptFlag,
-		flags.augmentationTypeFlag,
-	)
-
-	ctx := setupApplicationContext(loggerInstance)
-
-	var processingPipeline pipelineProcessor = createPipeline(cfg, loggerImpl)
-
-	runProcessing(ctx, processingPipeline, cfg, flags.singleFileFlag, loggerInstance)
+// NatsConnection defines the interface for NATS connection operations needed by
+// JobHandler.
+// This allows for mocking in tests.
+type NatsConnection interface {
+	Publish(subj string, data []byte) error
 }
 
-// commandLineFlags holds all command line flag values.
-type commandLineFlags struct {
-	configPathFlag       string
-	inputDirFlag         string
-	outputDirFlag        string
-	singleFileFlag       string
-	promptFlag           string
-	augmentationTypeFlag string
-	workersFlag          int
-	noAugmentFlag        bool
-	versionFlag          bool
+// PipelineProcessor defines the interface for the processing pipeline.
+// This allows for mocking in tests.
+type PipelineProcessor interface {
+	ProcessSingle(ctx context.Context, inputPath, outputPath string) error
 }
 
-// parseCommandLineFlags parses and returns command line flags.
-func parseCommandLineFlags() commandLineFlags {
-	var flags commandLineFlags
-
-	flag.StringVar(
-		&flags.configPathFlag,
-		"config",
-		"",
-		"Path to configuration file (default: find project.toml)",
-	)
-	flag.StringVar(
-		&flags.inputDirFlag,
-		"input",
-		"",
-		"Input directory containing PNG files (overrides config)",
-	)
-	flag.StringVar(
-		&flags.outputDirFlag,
-		"output",
-		"",
-		"Output directory for text files (overrides config)",
-	)
-	flag.StringVar(
-		&flags.singleFileFlag,
-		"file",
-		"",
-		"Process single PNG file instead of directory",
-	)
-	flag.IntVar(
-		&flags.workersFlag,
-		"workers",
-		0,
-		"Number of worker goroutines (overrides config)",
-	)
-	flag.BoolVar(
-		&flags.noAugmentFlag,
-		"no-augment",
-		false,
-		"Disable AI text augmentation",
-	)
-	flag.StringVar(
-		&flags.promptFlag,
-		"prompt",
-		"",
-		"Custom prompt for AI text augmentation (overrides config)",
-	)
-	flag.StringVar(
-		&flags.augmentationTypeFlag,
-		"augmentation-type",
-		"",
-		"Augmentation type: 'commentary' or 'summary' (overrides config)",
-	)
-	flag.BoolVar(&flags.versionFlag, "version", false, "Print version and exit")
-
-	flag.Parse()
-
-	return flags
+// JobHandler orchestrates the processing of a single NATS message.
+type JobHandler struct {
+	conn      NatsConnection
+	pipeline  PipelineProcessor
+	logger    *logger.Logger
+	appConfig *config.Config
 }
 
-// printVersionAndExit prints version information and exits.
-func printVersionAndExit() {
-	_, _ = fmt.Fprintln(os.Stdout, "png-to-text-service version 1.0.0")
-	os.Exit(0)
-}
-
-// initializeApplication loads config and initializes logger.
-func initializeApplication(configPath string) (*config.Config, *logger.Logger) {
-	cfg, err := loadConfiguration(configPath)
-	if err != nil {
-		fatalf("Failed to load configuration: %v", err)
-	}
-
-	loggerInstance, err := initializeLogger(cfg)
-	if err != nil {
-		fatalf("Failed to initialize logger: %v", err)
-	}
-
-	loggerInstance.Info("PNG-to-text-service starting up - version 1.0.0")
-
-	return cfg, loggerInstance
-}
-
-// closeLogger safely closes the logger instance.
-func closeLogger(loggerInstance logProvider) {
-	closeErr := loggerInstance.Close()
-	if closeErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to close logger: %v\n", closeErr)
-	}
-}
-
-// setupApplicationContext creates context and signal handling.
-func setupApplicationContext(loggerInstance logProvider) context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	setupSignalHandling(cancel, loggerInstance)
-
-	return ctx
-}
-
-// createPipeline creates and configures the processing pipeline.
-func createPipeline(
-	cfg *config.Config,
+// NewJobHandler creates a new handler with its required dependencies.
+func NewJobHandler(
+	conn NatsConnection,
+	proc PipelineProcessor,
 	loggerInstance *logger.Logger,
-) *pipeline.Pipeline {
-	dirErr := cfg.EnsureDirectories()
-	if dirErr != nil {
-		fatalf("Failed to ensure directories: %v", dirErr)
-	}
-
-	processingPipeline, err := pipeline.NewPipeline(cfg, loggerInstance)
-	if err != nil {
-		fatalf("Failed to create pipeline: %v", err)
-	}
-
-	return processingPipeline
-}
-
-// runProcessing executes the main processing logic.
-func runProcessing(
-	ctx context.Context,
-	processingPipeline pipelineProcessor,
 	cfg *config.Config,
-	singleFile string,
-	loggerInstance logProvider,
-) {
-	var err error
-
-	if singleFile != "" {
-		err = processSingleFile(
-			ctx,
-			processingPipeline,
-			singleFile,
-			cfg.Paths.OutputDir,
-			loggerInstance,
-		)
-	} else {
-		err = processDirectory(ctx, processingPipeline, cfg.Paths.InputDir, cfg.Paths.OutputDir, loggerInstance)
+) *JobHandler {
+	return &JobHandler{
+		conn:      conn,
+		pipeline:  proc,
+		logger:    loggerInstance,
+		appConfig: cfg,
 	}
-
-	if err != nil {
-		loggerInstance.Error("Processing failed: %v", err)
-		os.Exit(1)
-	}
-
-	loggerInstance.Success("PNG-to-text-service completed successfully")
 }
 
-// loadConfiguration loads the configuration from the specified path or finds it
-// automatically.
-func loadConfiguration(configPath string) (*config.Config, error) {
-	finalConfigPath, err := resolveConfigPath(configPath)
-	if err != nil {
-		return nil, err
+// Handle is the callback for the NATS subscription, processing a single job.
+func (h *JobHandler) Handle(msg *nats.Msg) {
+	job, unmarshalErr := parseJobMessage(msg.Data)
+	if unmarshalErr != nil {
+		h.logger.Error("Failed to unmarshal job JSON: %v", unmarshalErr)
+
+		return
 	}
 
-	cfg, err := config.Load(finalConfigPath)
+	h.logger.Info("Received job %s for PNG %s", job.JobID, job.PngPathInStorage)
+
+	outputPath, pathErr := generateOutputPath(
+		h.appConfig.Paths.OutputDir,
+		job.PngPathInStorage,
+	)
+	if pathErr != nil {
+		h.logger.Error(
+			"Failed to generate output path for job %s: %v",
+			job.JobID,
+			pathErr,
+		)
+
+		return
+	}
+
+	procErr := h.runPipelineProcessing(job.PngPathInStorage, outputPath)
+	if procErr != nil {
+		h.logger.Error(
+			"Failed to process PNG %s for job %s: %v",
+			job.PngPathInStorage,
+			job.JobID,
+			procErr,
+		)
+
+		return
+	}
+
+	pubErr := h.publishCompletionEvent(job, outputPath)
+	if pubErr != nil {
+		h.logger.Error(
+			"Failed to publish completion event for job %s: %v",
+			job.JobID,
+			pubErr,
+		)
+
+		return
+	}
+
+	h.logger.Success(
+		"Successfully processed and published result for job %s",
+		job.JobID,
+	)
+}
+
+// runPipelineProcessing executes the core OCR and augmentation logic with a timeout.
+func (h *JobHandler) runPipelineProcessing(pngPath, outputPath string) error {
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		time.Duration(h.appConfig.Settings.TimeoutSeconds)*time.Second,
+	)
+	defer cancel()
+
+	processErr := h.pipeline.ProcessSingle(ctx, pngPath, outputPath)
+	if processErr != nil {
+		return fmt.Errorf("pipeline.ProcessSingle failed: %w", processErr)
+	}
+
+	return nil
+}
+
+// publishCompletionEvent sends a message to NATS indicating the job is finished.
+func (h *JobHandler) publishCompletionEvent(job PngCreatedJob, outputPath string) error {
+	completionEvent := OcrCompletedJob{
+		TextPathInStorage: outputPath,
+		OriginalPngPath:   job.PngPathInStorage,
+		JobID:             job.JobID,
+	}
+
+	payload, marshErr := json.Marshal(completionEvent)
+	if marshErr != nil {
+		return fmt.Errorf("failed to marshal completion event: %w", marshErr)
+	}
+
+	pubErr := h.conn.Publish("ocr.completed", payload)
+	if pubErr != nil {
+		return fmt.Errorf("failed to publish completion event: %w", pubErr)
+	}
+
+	return nil
+}
+
+// parseJobMessage decodes the incoming NATS message data into a PngCreatedJob struct.
+func parseJobMessage(data []byte) (PngCreatedJob, error) {
+	var job PngCreatedJob
+
+	unmarshalErr := json.Unmarshal(data, &job)
+	if unmarshalErr != nil {
+		return PngCreatedJob{}, fmt.Errorf("json.Unmarshal: %w", unmarshalErr)
+	}
+
+	if job.PngPathInStorage == "" {
+		return PngCreatedJob{}, ErrPngPathEmpty
+	}
+
+	if job.JobID == "" {
+		return PngCreatedJob{}, ErrJobIDEmpty
+	}
+
+	return job, nil
+}
+
+// generateOutputPath creates the destination path for the processed text file.
+func generateOutputPath(outputDir, pngPath string) (string, error) {
+	if pngPath == "" {
+		return "", ErrInputPngPathEmpty
+	}
+
+	baseName := filepath.Base(pngPath)
+	txtName := strings.TrimSuffix(baseName, filepath.Ext(baseName)) + ".txt"
+
+	return filepath.Join(outputDir, txtName), nil
+}
+
+// --- Application Entrypoint ---
+
+// main is the entrypoint for the service.
+func main() {
+	err := run()
 	if err != nil {
+		log.Fatalf("Fatal application error: %v", err)
+	}
+}
+
+// run contains the main application logic to ensure deferred calls are executed
+// correctly.
+func run() error {
+	appConfig, configErr := loadConfiguration()
+	if configErr != nil {
+		// Use standard logger because custom logger isn't initialized yet.
+		log.Fatalf("Failed to load configuration: %v", configErr)
+	}
+
+	loggerInstance, loggerErr := initializeLogger(appConfig)
+	if loggerErr != nil {
+		log.Fatalf("Failed to initialize logger: %v", loggerErr)
+	}
+
+	defer func() {
+		closeErr := loggerInstance.Close()
+		if closeErr != nil {
+			log.Printf("Error closing logger: %v", closeErr)
+		}
+	}()
+
+	loggerInstance.Info("PNG-to-text-service worker v%s starting up...", appVersion)
+
+	natsConnection, connErr := nats.Connect(nats.DefaultURL)
+	if connErr != nil {
+		return fmt.Errorf("failed to connect to NATS: %w", connErr)
+	}
+	defer natsConnection.Close()
+
+	loggerInstance.Info(
+		"Connected to NATS server at %s",
+		natsConnection.ConnectedUrl(),
+	)
+
+	return subscribeAndRun(natsConnection, appConfig, loggerInstance)
+}
+
+// subscribeAndRun sets up the NATS subscription and waits for a shutdown signal.
+func subscribeAndRun(
+	natsConnection *nats.Conn,
+	appConfig *config.Config,
+	loggerInstance *logger.Logger,
+) error {
+	processingPipeline, pipeErr := pipeline.NewPipeline(appConfig, loggerInstance)
+	if pipeErr != nil {
+		return fmt.Errorf("failed to create pipeline: %w", pipeErr)
+	}
+
+	handler := NewJobHandler(
+		natsConnection,
+		processingPipeline,
+		loggerInstance,
+		appConfig,
+	)
+
+	subscription, subErr := natsConnection.QueueSubscribe(
+		"png.created",
+		"ocr_workers",
+		handler.Handle,
+	)
+	if subErr != nil {
+		return fmt.Errorf(
+			"failed to subscribe to NATS topic 'png.created': %w",
+			subErr,
+		)
+	}
+
+	loggerInstance.Info(
+		"Worker is running, subscribed to 'png.created' on queue 'ocr_workers'...",
+	)
+
+	return waitForShutdown(subscription, loggerInstance)
+}
+
+// waitForShutdown blocks until an OS signal is received, then gracefully drains the
+// subscription.
+func waitForShutdown(
+	subscription *nats.Subscription,
+	loggerInstance *logger.Logger,
+) error {
+	quitSignal := make(chan os.Signal, 1)
+	signal.Notify(quitSignal, syscall.SIGINT, syscall.SIGTERM)
+	<-quitSignal
+
+	loggerInstance.Info("Shutdown signal received, draining NATS subscription...")
+
+	drainErr := subscription.Drain()
+	if drainErr != nil {
+		return fmt.Errorf("failed to drain NATS subscription: %w", drainErr)
+	}
+
+	loggerInstance.Info("Shutdown complete.")
+
+	return nil
+}
+
+// --- Configuration and Logger Initialization ---
+
+// loadConfiguration finds and loads the `project.toml` file.
+func loadConfiguration() (*config.Config, error) {
+	workingDir, wdErr := os.Getwd()
+	if wdErr != nil {
+		return nil, fmt.Errorf("could not get working directory: %w", wdErr)
+	}
+
+	_, configPath, findErr := config.FindProjectRoot(workingDir)
+	if findErr != nil {
 		return nil, fmt.Errorf(
-			"load configuration from %s: %w",
-			finalConfigPath,
-			err,
+			"could not find project configuration: %w",
+			findErr,
 		)
 	}
 
-	return cfg, nil
+	appConfig, loadErr := config.Load(configPath)
+	if loadErr != nil {
+		return nil, fmt.Errorf(
+			"could not load configuration from %s: %w",
+			configPath,
+			loadErr,
+		)
+	}
+
+	return appConfig, nil
 }
 
-// resolveConfigPath determines the final configuration file path.
-func resolveConfigPath(configPath string) (string, error) {
-	if configPath != "" {
-		return configPath, nil
-	}
-
-	wd, err := osGetwd()
-	if err != nil {
-		return "", fmt.Errorf("get working directory: %w", err)
-	}
-
-	_, foundConfigPath, err := config.FindProjectRoot(wd)
-	if err != nil {
-		return "", fmt.Errorf("find project configuration: %w", err)
-	}
-
-	return foundConfigPath, nil
-}
-
-// initializeLogger creates and configures the logger instance.
-func initializeLogger(cfg *config.Config) (*logger.Logger, error) {
+// initializeLogger creates and configures the logger instance based on the application
+// config.
+func initializeLogger(appConfig *config.Config) (*logger.Logger, error) {
 	logFileName := fmt.Sprintf(
 		"png-to-text-service_%s.log",
 		time.Now().Format("2006-01-02_15-04-05"),
 	)
 
-	loggerInstance, err := logger.New(cfg.Logging.Dir, logFileName)
-	if err != nil {
-		return nil, fmt.Errorf("create logger: %w", err)
+	loggerInstance, newErr := logger.New(appConfig.Logging.Dir, logFileName)
+	if newErr != nil {
+		return nil, fmt.Errorf("could not create logger: %w", newErr)
 	}
 
 	return loggerInstance, nil
-}
-
-// applyCommandLineOverrides applies command line flag overrides to the configuration.
-func applyCommandLineOverrides(
-	cfg *config.Config,
-	inputDir, outputDir string,
-	workers int,
-	noAugment bool,
-	customPrompt, augmentationType string,
-) {
-	applyPathOverrides(cfg, inputDir, outputDir)
-	applySettingsOverrides(cfg, workers, noAugment)
-	applyAugmentationOverrides(cfg, customPrompt, augmentationType)
-}
-
-// applyPathOverrides applies path-related command line overrides.
-func applyPathOverrides(cfg *config.Config, inputDir, outputDir string) {
-	if inputDir != "" {
-		cfg.Paths.InputDir = inputDir
-	}
-
-	if outputDir != "" {
-		cfg.Paths.OutputDir = outputDir
-	}
-}
-
-// applySettingsOverrides applies settings-related command line overrides.
-func applySettingsOverrides(cfg *config.Config, workers int, noAugment bool) {
-	if workers > 0 {
-		cfg.Settings.Workers = workers
-	}
-
-	if noAugment {
-		cfg.Settings.EnableAugmentation = false
-	}
-}
-
-// applyAugmentationOverrides applies augmentation-related command line overrides.
-func applyAugmentationOverrides(
-	cfg *config.Config,
-	customPrompt, augmentationType string,
-) {
-	if customPrompt != "" {
-		cfg.Augmentation.CustomPrompt = customPrompt
-	}
-
-	if augmentationType != "" {
-		validateAndSetAugmentationType(cfg, augmentationType)
-	}
-}
-
-// validateAndSetAugmentationType validates and sets the augmentation type.
-func validateAndSetAugmentationType(cfg *config.Config, augmentationType string) {
-	if augmentationType == "commentary" || augmentationType == "summary" {
-		cfg.Augmentation.Type = augmentationType
-	} else {
-		fatalf("Invalid augmentation type: %s. Must be 'commentary' or 'summary'", augmentationType)
-	}
-}
-
-// setupSignalHandling configures graceful shutdown on SIGINT and SIGTERM.
-func setupSignalHandling(cancel context.CancelFunc, log logProvider) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		sig := <-sigChan
-		log.Info("Received signal %v, initiating graceful shutdown...", sig)
-		cancel()
-	}()
-}
-
-// processSingleFile processes a single PNG file.
-func processSingleFile(
-	ctx context.Context,
-	processingPipeline pipelineProcessor,
-	pngFile, outputDir string,
-	log logProvider,
-) error {
-	var err error
-
-	if !filepath.IsAbs(pngFile) {
-		var abs string
-
-		abs, err = filepath.Abs(pngFile)
-		if err != nil {
-			return fmt.Errorf(
-				"resolve absolute path for %s: %w",
-				pngFile,
-				err,
-			)
-		}
-
-		pngFile = abs
-	}
-
-	// Generate output path
-	baseName := filepath.Base(pngFile)
-	txtName := baseName[:len(baseName)-len(filepath.Ext(baseName))] + ".txt"
-	outputPath := filepath.Join(outputDir, txtName)
-
-	log.Info("Processing single file: %s -> %s", pngFile, outputPath)
-
-	err = processingPipeline.ProcessSingle(ctx, pngFile, outputPath)
-	if err != nil {
-		return fmt.Errorf("processing single file %s: %w", pngFile, err)
-	}
-
-	return nil
-}
-
-// processDirectory processes all PNG files in a directory.
-func processDirectory(
-	ctx context.Context,
-	processingPipeline pipelineProcessor,
-	inputDir, outputDir string,
-	log logProvider,
-) error {
-	if inputDir == "" || outputDir == "" {
-		return ErrDirectoriesRequired
-	}
-
-	// Validate input directory exists
-	_, err := os.Stat(inputDir)
-	if err != nil {
-		return fmt.Errorf("input directory %s: %w", inputDir, err)
-	}
-
-	log.Info("Processing directory: %s -> %s", inputDir, outputDir)
-
-	err = processingPipeline.ProcessDirectory(ctx, inputDir, outputDir)
-	if err != nil {
-		return fmt.Errorf("processing directory %s: %w", inputDir, err)
-	}
-
-	return nil
 }

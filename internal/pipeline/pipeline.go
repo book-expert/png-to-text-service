@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nnikolov3/logger"
+
 	"github.com/nnikolov3/png-to-text-service/internal/augment"
 	"github.com/nnikolov3/png-to-text-service/internal/config"
 	"github.com/nnikolov3/png-to-text-service/internal/ocr"

@@ -7,8 +7,9 @@ import (
 	"testing"
 
 	"github.com/nnikolov3/logger"
-	"github.com/nnikolov3/png-to-text-service/internal/augment"
 	"github.com/stretchr/testify/require"
+
+	"github.com/nnikolov3/png-to-text-service/internal/augment"
 )
 
 func TestNewGeminiProcessor(t *testing.T) {

@@ -3,312 +3,433 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/nnikolov3/png-to-text-service/internal/config"
+	"github.com/nats-io/nats.go"
+	"github.com/nnikolov3/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/nnikolov3/png-to-text-service/internal/config"
 )
 
-// Constants for test data.
-const (
-	testWorkers           = 8
-	testCustomPrompt      = "Summarize this document."
-	testAugmentationType  = "summary"
-	testInvalidAugmenType = "invalid-type"
-	testDirPermissions    = 0o750
+// Static errors for mocks, adhering to err113.
+var (
+	errNatsPublish         = errors.New("nats publish error")
+	errPipelineProcessing  = errors.New("pipeline processing error")
+	errPipelineCtxExceeded = errors.New("pipeline context deadline exceeded")
 )
 
-// mockLogger captures log output for verification in tests.
-// It correctly implements the logProvider interface.
-type mockLogger struct {
-	outputs []string
-	mu      sync.Mutex
+// --- Mocks and Test Helpers ---
+
+// mockNatsConnection is a mock implementation of the NatsConnection interface for
+// testing.
+type mockNatsConnection struct {
+	published map[string][]byte
+	sync.Mutex
+	shouldErr bool
 }
 
-func (m *mockLogger) Info(
-	format string,
-	args ...any,
-) {
-	m.log("INFO: " + fmt.Sprintf(format, args...))
+func newMockNatsConnection() *mockNatsConnection {
+	return &mockNatsConnection{
+		Mutex:     sync.Mutex{},
+		published: make(map[string][]byte),
+		shouldErr: false,
+	}
 }
 
-func (m *mockLogger) Error(format string, args ...any) {
-	m.log("ERROR: " + fmt.Sprintf(format, args...))
-}
+func (m *mockNatsConnection) Publish(subj string, data []byte) error {
+	m.Lock()
+	defer m.Unlock()
 
-func (m *mockLogger) Success(format string, args ...any) {
-	m.log("SUCCESS: " + fmt.Sprintf(format, args...))
-}
-func (m *mockLogger) Close() error { return nil }
-func (m *mockLogger) log(message string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.outputs = append(m.outputs, message)
-}
-
-func (m *mockLogger) getLastOutput() string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if len(m.outputs) == 0 {
-		return ""
+	if m.shouldErr {
+		return errNatsPublish
 	}
 
-	return m.outputs[len(m.outputs)-1]
+	m.published[subj] = data
+
+	return nil
 }
 
-// mockPipeline simulates the processing pipeline for testing main logic.
-// It correctly implements the pipelineProcessor interface.
+func (m *mockNatsConnection) getPublished(subj string) ([]byte, bool) {
+	m.Lock()
+	defer m.Unlock()
+
+	data, ok := m.published[subj]
+
+	return data, ok
+}
+
+// mockPipeline is a mock implementation of the PipelineProcessor interface.
 type mockPipeline struct {
-	processSingleErr       error
-	processDirectoryErr    error
-	processSingleCalled    bool
-	processDirectoryCalled bool
+	shouldErr bool
 }
 
-// ProcessSingle mocks the single file processing method.
-// The unused parameters are named _ to satisfy the linter.
-func (p *mockPipeline) ProcessSingle(_ context.Context, _, _ string) error {
-	p.processSingleCalled = true
+func (m *mockPipeline) ProcessSingle(_ context.Context, _, outputPath string) error {
+	if m.shouldErr {
+		return errPipelineProcessing
+	}
+	// Simulate work by creating a dummy output file.
+	writeErr := os.WriteFile(outputPath, []byte("processed text"), 0o600)
+	if writeErr != nil {
+		return fmt.Errorf("mock failed to write file: %w", writeErr)
+	}
 
-	return p.processSingleErr
+	return nil
 }
 
-// ProcessDirectory mocks the directory processing method.
-// The unused parameters are named _ to satisfy the linter.
-func (p *mockPipeline) ProcessDirectory(_ context.Context, _, _ string) error {
-	p.processDirectoryCalled = true
+// newTestLogger creates a logger instance that writes to a temporary directory.
+func newTestLogger(t *testing.T) *logger.Logger {
+	t.Helper()
 
-	return p.processDirectoryErr
+	logDir := t.TempDir()
+	testLogger, err := logger.New(logDir, "test.log")
+	require.NoError(t, err)
+
+	return testLogger
 }
 
-// newTestConfig creates a clean, fully-populated config object for each test,
-// satisfying the exhaustruct linter.
+// newTestConfig creates a clean, fully-populated config object for tests.
 func newTestConfig(t *testing.T) *config.Config {
 	t.Helper()
 
 	return &config.Config{
 		Project: config.Project{
-			Name:        "test-project",
-			Version:     "1.0.0",
-			Description: "Test Description",
+			Name:        "",
+			Version:     "",
+			Description: "",
 		},
 		Paths: config.Paths{
-			InputDir:  t.TempDir(),
+			InputDir:  "",
 			OutputDir: t.TempDir(),
 		},
 		Prompts: config.Prompts{
-			Augmentation: "Test Augmentation Prompt",
+			Augmentation: "",
 		},
 		Augmentation: config.Augmentation{
-			Type:             "commentary",
-			CustomPrompt:     "Test Custom Prompt",
-			UsePromptBuilder: true,
+			Type:             "",
+			CustomPrompt:     "",
+			UsePromptBuilder: false,
 		},
 		Logging: config.Logging{
-			Level:                "info",
-			Dir:                  "/test/logs",
-			EnableFileLogging:    true,
-			EnableConsoleLogging: true,
+			Level:                "",
+			Dir:                  "",
+			EnableFileLogging:    false,
+			EnableConsoleLogging: false,
 		},
 		Tesseract: config.Tesseract{
-			Language:       "eng",
-			OEM:            3,
-			PSM:            3,
-			DPI:            300,
-			TimeoutSeconds: 60,
+			Language:       "",
+			OEM:            0,
+			PSM:            0,
+			DPI:            0,
+			TimeoutSeconds: 0,
 		},
 		Gemini: config.Gemini{
-			APIKeyVariable:    "TEST_API_KEY",
-			Models:            []string{"gemini-pro"},
-			MaxRetries:        3,
-			RetryDelaySeconds: 5,
-			TimeoutSeconds:    60,
-			Temperature:       0.7,
-			TopK:              40,
-			TopP:              0.9,
-			MaxTokens:         2048,
+			APIKeyVariable:    "",
+			Models:            nil,
+			MaxRetries:        0,
+			RetryDelaySeconds: 0,
+			TimeoutSeconds:    0,
+			Temperature:       0,
+			TopK:              0,
+			TopP:              0,
+			MaxTokens:         0,
 		},
 		Settings: config.Settings{
-			Workers:            4,
-			TimeoutSeconds:     120,
-			EnableAugmentation: true,
+			Workers:            0,
+			TimeoutSeconds:     1, // Default timeout for tests
+			EnableAugmentation: false,
 			SkipExisting:       false,
 		},
 	}
 }
 
-// TestApplyPathOverrides checks if input/output directory flags override the config.
-func TestApplyPathOverrides(t *testing.T) {
+// --- Unit Tests ---
+
+func TestParseJobMessage(t *testing.T) {
 	t.Parallel()
 
-	cfg := newTestConfig(t)
-	newInputDir := "/new/input/from/flag"
-	newOutputDir := "/new/output/from/flag"
-
-	applyPathOverrides(cfg, newInputDir, newOutputDir)
-
-	assert.Equal(t, newInputDir, cfg.Paths.InputDir)
-	assert.Equal(t, newOutputDir, cfg.Paths.OutputDir)
-}
-
-// TestApplySettingsOverrides checks if worker and no-augment flags override the config.
-func TestApplySettingsOverrides(t *testing.T) {
-	t.Parallel()
-
-	cfg := newTestConfig(t)
-	newWorkers := testWorkers
-	disableAugmentation := true
-
-	applySettingsOverrides(cfg, newWorkers, disableAugmentation)
-
-	assert.Equal(t, newWorkers, cfg.Settings.Workers)
-	assert.False(t, cfg.Settings.EnableAugmentation)
-}
-
-// TestApplyAugmentationOverrides checks if prompt and type flags override the config.
-func TestApplyAugmentationOverrides(t *testing.T) {
-	t.Parallel()
-
-	cfg := newTestConfig(t)
-	newPrompt := testCustomPrompt
-	newType := testAugmentationType
-
-	applyAugmentationOverrides(cfg, newPrompt, newType)
-
-	assert.Equal(t, newPrompt, cfg.Augmentation.CustomPrompt)
-	assert.Equal(t, newType, cfg.Augmentation.Type)
-}
-
-// TestProcessSingleFile_Success verifies the logic for processing one file.
-func TestProcessSingleFile_Success(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	pngFile := filepath.Join(tmpDir, "test.png")
-	_, createErr := os.Create(pngFile)
-	require.NoError(t, createErr)
-
-	// All fields are explicitly initialized to satisfy the exhaustruct linter.
-	mockPipe := &mockPipeline{
-		processSingleCalled:    false,
-		processDirectoryCalled: false,
-		processSingleErr:       nil,
-		processDirectoryErr:    nil,
+	tests := []struct {
+		expectedJob PngCreatedJob
+		name        string
+		inputJSON   string
+		errContains string
+		expectErr   bool
+	}{
+		{
+			name:      "Valid Job",
+			inputJSON: `{"pngPathInStorage": "/path/to/image.png", "jobId": "job-123"}`,
+			expectErr: false,
+			expectedJob: PngCreatedJob{
+				PngPathInStorage: "/path/to/image.png",
+				JobID:            "job-123",
+			},
+			errContains: "",
+		},
+		{
+			name:        "Invalid JSON",
+			inputJSON:   `{"invalid json`,
+			expectErr:   true,
+			expectedJob: PngCreatedJob{PngPathInStorage: "", JobID: ""},
+			errContains: "json.Unmarshal",
+		},
+		{
+			name:        "Missing PngPathInStorage",
+			inputJSON:   `{"jobId": "job-123"}`,
+			expectErr:   true,
+			expectedJob: PngCreatedJob{PngPathInStorage: "", JobID: ""},
+			errContains: "pngPathInStorage cannot be empty",
+		},
+		{
+			name:        "Missing JobID",
+			inputJSON:   `{"pngPathInStorage": "/path/to/image.png"}`,
+			expectErr:   true,
+			expectedJob: PngCreatedJob{PngPathInStorage: "", JobID: ""},
+			errContains: "jobId cannot be empty",
+		},
 	}
-	mockLog := &mockLogger{mu: sync.Mutex{}, outputs: nil}
 
-	err := processSingleFile(context.Background(), mockPipe, pngFile, tmpDir, mockLog)
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
 
-	require.NoError(t, err)
-	assert.True(t, mockPipe.processSingleCalled)
-	assert.Contains(t, mockLog.getLastOutput(), "Processing single file")
+			job, err := parseJobMessage([]byte(testCase.inputJSON))
+			if testCase.expectErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), testCase.errContains)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, testCase.expectedJob, job)
+			}
+		})
+	}
 }
 
-// TestProcessDirectory_Success verifies the logic for processing a directory.
-func TestProcessDirectory_Success(t *testing.T) {
+func TestGenerateOutputPath(t *testing.T) {
 	t.Parallel()
-	// All fields are explicitly initialized to satisfy the exhaustruct linter.
-	mockPipe := &mockPipeline{
-		processSingleCalled:    false,
-		processDirectoryCalled: false,
-		processSingleErr:       nil,
-		processDirectoryErr:    nil,
-	}
-	mockLog := &mockLogger{mu: sync.Mutex{}, outputs: nil}
-	cfg := newTestConfig(t) // Uses temp dirs from config
 
-	err := processDirectory(
-		context.Background(),
-		mockPipe,
-		cfg.Paths.InputDir,
-		cfg.Paths.OutputDir,
-		mockLog,
+	tests := []struct {
+		name         string
+		outputDir    string
+		pngPath      string
+		expectedPath string
+		errContains  string
+		expectErr    bool
+	}{
+		{
+			name:         "Valid Path",
+			outputDir:    "/tmp/output",
+			pngPath:      "/tmp/input/image.png",
+			expectedPath: "/tmp/output/image.txt",
+			expectErr:    false,
+			errContains:  "",
+		},
+		{
+			name:         "Path with spaces",
+			outputDir:    "/tmp/output",
+			pngPath:      "/tmp/input/my image.png",
+			expectedPath: "/tmp/output/my image.txt",
+			expectErr:    false,
+			errContains:  "",
+		},
+		{
+			name:         "Empty PNG Path",
+			outputDir:    "/tmp/output",
+			pngPath:      "",
+			expectedPath: "",
+			expectErr:    true,
+			errContains:  "input png path cannot be empty",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+
+			path, err := generateOutputPath(
+				testCase.outputDir,
+				testCase.pngPath,
+			)
+			if testCase.expectErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), testCase.errContains)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, testCase.expectedPath, path)
+			}
+		})
+	}
+}
+
+// --- JobHandler Tests ---
+
+func TestJobHandler_Handle_Success(t *testing.T) {
+	t.Parallel()
+	// Setup
+	mockConn := newMockNatsConnection()
+	mockProc := &mockPipeline{shouldErr: false}
+	testCfg := newTestConfig(t)
+	testLog := newTestLogger(t)
+
+	handler := NewJobHandler(mockConn, mockProc, testLog, testCfg)
+
+	job := PngCreatedJob{PngPathInStorage: "/test/image.png", JobID: "success-job"}
+	jobJSON, marshalErr := json.Marshal(job)
+	require.NoError(t, marshalErr)
+
+	natsMsg := &nats.Msg{Data: jobJSON, Subject: "", Reply: "", Header: nil, Sub: nil}
+
+	// Execute
+	handler.Handle(natsMsg)
+
+	// Verify
+	// 1. Check if the output file was created by the mock pipeline.
+	expectedOutputPath := filepath.Join(testCfg.Paths.OutputDir, "image.txt")
+	_, statErr := os.Stat(expectedOutputPath)
+	require.NoError(t, statErr, "Expected output file to be created")
+
+	// 2. Check if the completion event was published to NATS.
+	publishedData, ok := mockConn.getPublished("ocr.completed")
+	require.True(t, ok, "Expected a message to be published to 'ocr.completed'")
+
+	var completionJob OcrCompletedJob
+
+	unmarshalErr := json.Unmarshal(publishedData, &completionJob)
+	require.NoError(t, unmarshalErr)
+
+	assert.Equal(t, job.JobID, completionJob.JobID)
+	assert.Equal(t, job.PngPathInStorage, completionJob.OriginalPngPath)
+	assert.Equal(t, expectedOutputPath, completionJob.TextPathInStorage)
+}
+
+func TestJobHandler_Handle_UnmarshalFailure(t *testing.T) {
+	t.Parallel()
+	// Setup
+	mockConn := newMockNatsConnection()
+	mockProc := &mockPipeline{shouldErr: false}
+	testCfg := newTestConfig(t)
+	testLog := newTestLogger(t)
+	handler := NewJobHandler(mockConn, mockProc, testLog, testCfg)
+	natsMsg := &nats.Msg{
+		Data:    []byte("invalid json"),
+		Subject: "",
+		Reply:   "",
+		Header:  nil,
+		Sub:     nil,
+	}
+
+	// Execute
+	handler.Handle(natsMsg)
+
+	// Verify - No message should be published
+	_, ok := mockConn.getPublished("ocr.completed")
+	assert.False(t, ok, "Should not publish on unmarshal failure")
+}
+
+func TestJobHandler_Handle_PipelineFailure(t *testing.T) {
+	t.Parallel()
+	// Setup
+	mockConn := newMockNatsConnection()
+	mockProc := &mockPipeline{shouldErr: true} // Force pipeline to fail
+	testCfg := newTestConfig(t)
+	testLog := newTestLogger(t)
+	handler := NewJobHandler(mockConn, mockProc, testLog, testCfg)
+	job := PngCreatedJob{
+		PngPathInStorage: "/test/image.png",
+		JobID:            "pipeline-fail-job",
+	}
+	jobJSON, marshalErr := json.Marshal(job)
+	require.NoError(t, marshalErr)
+
+	natsMsg := &nats.Msg{Data: jobJSON, Subject: "", Reply: "", Header: nil, Sub: nil}
+
+	// Execute
+	handler.Handle(natsMsg)
+
+	// Verify
+	_, ok := mockConn.getPublished("ocr.completed")
+	assert.False(t, ok, "Should not publish on pipeline processing failure")
+}
+
+func TestJobHandler_Handle_PublishFailure(t *testing.T) {
+	t.Parallel()
+	// Setup
+	mockConn := newMockNatsConnection()
+
+	mockConn.shouldErr = true // Force NATS publish to fail
+
+	mockProc := &mockPipeline{shouldErr: false}
+	testCfg := newTestConfig(t)
+	testLog := newTestLogger(t)
+	handler := NewJobHandler(mockConn, mockProc, testLog, testCfg)
+	job := PngCreatedJob{
+		PngPathInStorage: "/test/image.png",
+		JobID:            "publish-fail-job",
+	}
+	jobJSON, marshalErr := json.Marshal(job)
+	require.NoError(t, marshalErr)
+
+	natsMsg := &nats.Msg{Data: jobJSON, Subject: "", Reply: "", Header: nil, Sub: nil}
+
+	// Execute - We don't check for panics, but we expect an error log.
+	// In a real scenario, you'd check the logs or metrics.
+	handler.Handle(natsMsg)
+
+	// The meaningful test is that the service doesn't crash.
+	// We confirmed this by running the handler. No further assertion is needed.
+}
+
+// stallingMockPipeline is a mock that blocks to test context cancellation.
+type stallingMockPipeline struct {
+	stallDuration time.Duration
+}
+
+// ProcessSingle waits for a stall duration or until the context is canceled.
+// It uses time.NewTimer for a leak-proof implementation.
+func (m *stallingMockPipeline) ProcessSingle(ctx context.Context, _, _ string) error {
+	timer := time.NewTimer(m.stallDuration)
+	defer timer.Stop() // Ensures the timer doesn't leak if context cancels first.
+
+	select {
+	case <-timer.C:
+		return nil // Stall completed without context cancellation.
+	case <-ctx.Done():
+		return errPipelineCtxExceeded // Context was canceled, as expected.
+	}
+}
+
+func TestJobHandler_RunPipelineProcessing_Timeout(t *testing.T) {
+	t.Parallel()
+	// Setup
+	// The stall duration MUST be longer than the timeout to trigger the timeout.
+	stallingPipeline := &stallingMockPipeline{stallDuration: 2 * time.Second}
+	testCfg := newTestConfig(t)
+
+	testCfg.Settings.TimeoutSeconds = 1 // 1 second timeout
+
+	handler := &JobHandler{
+		conn:      nil,
+		pipeline:  stallingPipeline,
+		logger:    newTestLogger(t),
+		appConfig: testCfg,
+	}
+
+	// Execute: Run processing and expect a context deadline exceeded error.
+	err := handler.runPipelineProcessing("input.png", "output.txt")
+
+	// Verify
+	require.Error(t, err, "An error is expected due to timeout")
+	assert.ErrorIs(
+		t,
+		err,
+		errPipelineCtxExceeded,
+		"The error should be the specific context exceeded error",
 	)
-
-	require.NoError(t, err)
-	assert.True(t, mockPipe.processDirectoryCalled)
-	assert.Contains(t, mockLog.getLastOutput(), "Processing directory")
-}
-
-// TestProcessDirectory_MissingDirError checks for the specific error when a dir is
-// missing.
-func TestProcessDirectory_MissingDirError(t *testing.T) {
-	t.Parallel()
-	// All fields are explicitly initialized to satisfy the exhaustruct linter.
-	mockPipe := &mockPipeline{
-		processSingleCalled:    false,
-		processDirectoryCalled: false,
-		processSingleErr:       nil,
-		processDirectoryErr:    nil,
-	}
-	mockLog := &mockLogger{mu: sync.Mutex{}, outputs: nil}
-
-	err := processDirectory(
-		context.Background(),
-		mockPipe,
-		"",
-		"/some/output",
-		mockLog,
-	)
-
-	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrDirectoriesRequired)
-}
-
-// TestResolveConfigPath_FindsRoot confirms it finds project.toml automatically.
-func TestResolveConfigPath_FindsRoot(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	subDir := filepath.Join(tmpDir, "cmd")
-	require.NoError(t, os.Mkdir(subDir, testDirPermissions))
-
-	expectedConfigPath := filepath.Join(tmpDir, "project.toml")
-	_, createErr := os.Create(expectedConfigPath)
-	require.NoError(t, createErr)
-
-	// Mock osGetwd by overwriting the package-level variable.
-	originalGetwd := osGetwd
-
-	osGetwd = func() (string, error) { return subDir, nil }
-
-	defer func() { osGetwd = originalGetwd }() // Restore original function
-
-	foundPath, err := resolveConfigPath("")
-
-	require.NoError(t, err)
-	assert.Equal(t, expectedConfigPath, foundPath)
-}
-
-// TestValidateAndSetAugmentationType tests the validation logic for augmentation types.
-func TestValidateAndSetAugmentationType(t *testing.T) {
-	t.Parallel()
-
-	cfg := newTestConfig(t)
-
-	// We can't directly test os.Exit(1), but we can test the fatalf call
-	// by checking if it panics. This requires replacing the package-level fatalf.
-	originalFatalf := fatalf
-
-	defer func() { fatalf = originalFatalf }()
-
-	fatalf = func(format string, args ...any) {
-		panic(fmt.Sprintf(format, args...))
-	}
-
-	// Assert that calling with an invalid type panics with the expected message.
-	expectedPanicMsg := fmt.Sprintf(
-		"Invalid augmentation type: %s. Must be 'commentary' or 'summary'",
-		testInvalidAugmenType,
-	)
-	assert.PanicsWithValue(t, expectedPanicMsg, func() {
-		validateAndSetAugmentationType(cfg, testInvalidAugmenType)
-	})
 }
