@@ -25,6 +25,10 @@ var (
 	errNatsPublish         = errors.New("nats publish error")
 	errPipelineProcessing  = errors.New("pipeline processing error")
 	errPipelineCtxExceeded = errors.New("pipeline context deadline exceeded")
+	errJetStreamNoMessage  = errors.New("no messages available")
+	errConsumerFetch       = errors.New("consumer fetch error")
+	errStreamCreation      = errors.New("stream creation failed")
+	errConsumerCreation    = errors.New("consumer creation failed")
 )
 
 // --- Mocks and Test Helpers ---
@@ -58,11 +62,11 @@ func (m *mockNatsConnection) Publish(subj string, data []byte) error {
 	return nil
 }
 
-func (m *mockNatsConnection) getPublished(subj string) ([]byte, bool) {
+func (m *mockNatsConnection) getOcrCompletedMessage() ([]byte, bool) {
 	m.Lock()
 	defer m.Unlock()
 
-	data, ok := m.published[subj]
+	data, ok := m.published["ocr.completed"]
 
 	return data, ok
 }
@@ -83,6 +87,92 @@ func (m *mockPipeline) ProcessSingle(_ context.Context, _, outputPath string) er
 	}
 
 	return nil
+}
+
+// mockJetStreamMessage represents a JetStream message for testing.
+type mockJetStreamMessage struct {
+	ackFunc func() error
+	nakFunc func() error
+	data    []byte
+}
+
+func (m *mockJetStreamMessage) Data() []byte {
+	return m.data
+}
+
+func (m *mockJetStreamMessage) Ack() error {
+	if m.ackFunc != nil {
+		return m.ackFunc()
+	}
+
+	return nil
+}
+
+func (m *mockJetStreamMessage) Nak() error {
+	if m.nakFunc != nil {
+		return m.nakFunc()
+	}
+
+	return nil
+}
+
+// mockJetStreamConsumer is a mock implementation of JetStream consumer operations.
+type mockJetStreamConsumer struct {
+	consumeErr error
+	messages   []*mockJetStreamMessage
+	messageIdx int
+	mutex      sync.Mutex
+	shouldErr  bool
+}
+
+func newMockJetStreamConsumer() *mockJetStreamConsumer {
+	return &mockJetStreamConsumer{
+		consumeErr: nil,
+		messages:   make([]*mockJetStreamMessage, 0),
+		messageIdx: 0,
+		mutex:      sync.Mutex{},
+		shouldErr:  false,
+	}
+}
+
+func (m *mockJetStreamConsumer) FetchMessage() (*jetStreamMessageWrapper, error) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.shouldErr {
+		return nil, m.consumeErr
+	}
+
+	if m.messageIdx >= len(m.messages) {
+		return nil, errJetStreamNoMessage
+	}
+
+	msg := m.messages[m.messageIdx]
+	m.messageIdx++
+
+	// Wrap the mock message in the expected wrapper type
+	return &jetStreamMessageWrapper{
+		msg: &nats.Msg{
+			Data:    msg.data,
+			Subject: "",
+			Reply:   "",
+			Header:  nil,
+			Sub:     nil,
+		},
+	}, nil
+}
+
+func (m *mockJetStreamConsumer) addMessage(data []byte) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	msg := &mockJetStreamMessage{
+		data:    data,
+		ackFunc: func() error { return nil },
+		nakFunc: func() error { return nil },
+	}
+
+	m.messages = append(m.messages, msg)
 }
 
 // newTestLogger creates a logger instance that writes to a temporary directory.
@@ -296,7 +386,7 @@ func TestJobHandler_Handle_Success(t *testing.T) {
 	require.NoError(t, statErr, "Expected output file to be created")
 
 	// 2. Check if the completion event was published to NATS.
-	publishedData, ok := mockConn.getPublished("ocr.completed")
+	publishedData, ok := mockConn.getOcrCompletedMessage()
 	require.True(t, ok, "Expected a message to be published to 'ocr.completed'")
 
 	var completionJob OcrCompletedJob
@@ -329,7 +419,7 @@ func TestJobHandler_Handle_UnmarshalFailure(t *testing.T) {
 	handler.Handle(natsMsg)
 
 	// Verify - No message should be published
-	_, ok := mockConn.getPublished("ocr.completed")
+	_, ok := mockConn.getOcrCompletedMessage()
 	assert.False(t, ok, "Should not publish on unmarshal failure")
 }
 
@@ -354,7 +444,7 @@ func TestJobHandler_Handle_PipelineFailure(t *testing.T) {
 	handler.Handle(natsMsg)
 
 	// Verify
-	_, ok := mockConn.getPublished("ocr.completed")
+	_, ok := mockConn.getOcrCompletedMessage()
 	assert.False(t, ok, "Should not publish on pipeline processing failure")
 }
 
@@ -432,4 +522,240 @@ func TestJobHandler_RunPipelineProcessing_Timeout(t *testing.T) {
 		errPipelineCtxExceeded,
 		"The error should be the specific context exceeded error",
 	)
+}
+
+// TestJetStreamMessage_Success tests successful JetStream message operations.
+func TestJetStreamMessage_Success(t *testing.T) {
+	t.Parallel()
+
+	testData := []byte(`{"jobId": "test", "pngPathInStorage": "/test/file.png"}`)
+	msg := &mockJetStreamMessage{
+		ackFunc: func() error { return nil },
+		nakFunc: func() error { return nil },
+		data:    testData,
+	}
+
+	// Test Data method
+	assert.Equal(t, testData, msg.Data())
+
+	// Test successful Ack
+	ackErr := msg.Ack()
+	require.NoError(t, ackErr)
+
+	// Test successful Nak
+	nakErr := msg.Nak()
+	require.NoError(t, nakErr)
+}
+
+// TestJetStreamConsumer_Success tests successful JetStream consumer operations.
+func TestJetStreamConsumer_Success(t *testing.T) {
+	t.Parallel()
+
+	consumer := newMockJetStreamConsumer()
+	testData := []byte(`{"jobId": "test", "pngPathInStorage": "/test/file.png"}`)
+
+	// Add a test message
+	consumer.addMessage(testData)
+
+	// Fetch the message
+	msg, fetchErr := consumer.FetchMessage()
+	require.NoError(t, fetchErr)
+	require.NotNil(t, msg)
+	assert.Equal(t, testData, msg.Data())
+
+	// Verify no more messages available
+	_, noMsgErr := consumer.FetchMessage()
+	assert.ErrorIs(t, noMsgErr, errJetStreamNoMessage)
+}
+
+// TestJetStreamConsumer_Error tests JetStream consumer error scenarios.
+func TestJetStreamConsumer_Error(t *testing.T) {
+	t.Parallel()
+
+	consumer := newMockJetStreamConsumer()
+
+	consumer.shouldErr = true
+	consumer.consumeErr = errConsumerFetch
+
+	// Should return error when shouldErr is true
+	_, fetchErr := consumer.FetchMessage()
+	require.Error(t, fetchErr)
+	assert.ErrorIs(t, fetchErr, errConsumerFetch)
+}
+
+// TestJetStreamClientWrapper tests the wrapper around NATS JetStream client.
+func TestJetStreamClientWrapper_Success(t *testing.T) {
+	t.Parallel()
+
+	// This test will need mock NATS connection or embedded server
+	// For now, we'll test that the wrapper can be created successfully
+	t.Skip("Integration test - requires NATS server")
+}
+
+// TestJobHandler_ProcessJetStreamMessage tests processing a single JetStream message.
+func TestJobHandler_ProcessJetStreamMessage_Success(t *testing.T) {
+	t.Parallel()
+
+	mockConn := newMockNatsConnection()
+	mockProc := &mockPipeline{shouldErr: false}
+	testCfg := newTestConfig(t)
+	testLog := newTestLogger(t)
+	handler := NewJobHandler(mockConn, mockProc, testLog, testCfg)
+
+	// Create test job message
+	job := PngCreatedJob{
+		PngPathInStorage: "/test/image.png",
+		JobID:            "jetstream-test-job",
+	}
+	jobJSON, marshalErr := json.Marshal(job)
+	require.NoError(t, marshalErr)
+
+	// Create mock JetStream message
+	msg := &mockJetStreamMessage{
+		data:    jobJSON,
+		ackFunc: func() error { return nil },
+		nakFunc: func() error { return nil },
+	}
+
+	// Execute
+	processErr := handler.ProcessJetStreamMessage(msg)
+
+	// Verify
+	require.NoError(t, processErr)
+
+	// Verify completion message was published
+	publishedData, wasPublished := mockConn.getOcrCompletedMessage()
+	require.True(t, wasPublished, "Should publish completion event")
+
+	var completionEvent OcrCompletedJob
+
+	unmarshalErr := json.Unmarshal(publishedData, &completionEvent)
+	require.NoError(t, unmarshalErr)
+	assert.Equal(t, "jetstream-test-job", completionEvent.JobID)
+	assert.Equal(t, "/test/image.png", completionEvent.OriginalPngPath)
+}
+
+// TestJobHandler_ProcessJetStreamMessage_ProcessingError tests error handling.
+func TestJobHandler_ProcessJetStreamMessage_ProcessingError(t *testing.T) {
+	t.Parallel()
+
+	mockConn := newMockNatsConnection()
+	mockProc := &mockPipeline{shouldErr: true} // Force processing error
+	testCfg := newTestConfig(t)
+	testLog := newTestLogger(t)
+	handler := NewJobHandler(mockConn, mockProc, testLog, testCfg)
+
+	// Create test job message
+	job := PngCreatedJob{
+		PngPathInStorage: "/test/image.png",
+		JobID:            "error-test-job",
+	}
+	jobJSON, marshalErr := json.Marshal(job)
+	require.NoError(t, marshalErr)
+
+	// Create mock JetStream message
+	msg := &mockJetStreamMessage{
+		data:    jobJSON,
+		ackFunc: func() error { return nil },
+		nakFunc: func() error { return nil },
+	}
+
+	// Execute - should return error but still acknowledge message
+	processErr := handler.ProcessJetStreamMessage(msg)
+
+	// Verify error is returned for processing failure
+	require.Error(t, processErr)
+
+	// Verify no completion message was published on error
+	_, wasPublished := mockConn.getOcrCompletedMessage()
+	assert.False(t, wasPublished, "Should not publish on processing error")
+}
+
+// mockJetStreamContext is a mock implementation for testing JetStream operations.
+type mockJetStreamContext struct {
+	streamErr       error
+	consumerErr     error
+	streamName      string
+	consumerName    string
+	streamCreated   bool
+	consumerCreated bool
+}
+
+func newMockJetStreamContext() *mockJetStreamContext {
+	return &mockJetStreamContext{
+		streamCreated:   false,
+		consumerCreated: false,
+		streamName:      "",
+		consumerName:    "",
+		streamErr:       nil,
+		consumerErr:     nil,
+	}
+}
+
+func (m *mockJetStreamContext) CreateStream(name string, _ []string) error {
+	if m.streamErr != nil {
+		return m.streamErr
+	}
+
+	m.streamCreated = true
+	m.streamName = name
+
+	return nil
+}
+
+func (m *mockJetStreamContext) CreateConsumer(_, consumerName string) error {
+	if m.consumerErr != nil {
+		return m.consumerErr
+	}
+
+	m.consumerCreated = true
+	m.consumerName = consumerName
+
+	return nil
+}
+
+// TestConfigureJetStreamResources tests JetStream stream and consumer configuration.
+func TestConfigureJetStreamResources_Success(t *testing.T) {
+	t.Parallel()
+
+	mockJS := newMockJetStreamContext()
+
+	configErr := configureJetStreamResources(mockJS)
+
+	require.NoError(t, configErr)
+	assert.True(t, mockJS.streamCreated, "Stream should be created")
+	assert.True(t, mockJS.consumerCreated, "Consumer should be created")
+	assert.Equal(t, "PNG_PROCESSING", mockJS.streamName)
+	assert.Equal(t, "png-text-workers", mockJS.consumerName)
+}
+
+// TestConfigureJetStreamResources_StreamError tests stream creation failure.
+func TestConfigureJetStreamResources_StreamError(t *testing.T) {
+	t.Parallel()
+
+	mockJS := newMockJetStreamContext()
+
+	mockJS.streamErr = errStreamCreation
+
+	configErr := configureJetStreamResources(mockJS)
+
+	require.Error(t, configErr)
+	assert.Contains(t, configErr.Error(), "failed to create stream")
+	assert.False(t, mockJS.streamCreated, "Stream creation should fail")
+}
+
+// TestConfigureJetStreamResources_ConsumerError tests consumer creation failure.
+func TestConfigureJetStreamResources_ConsumerError(t *testing.T) {
+	t.Parallel()
+
+	mockJS := newMockJetStreamContext()
+
+	mockJS.consumerErr = errConsumerCreation
+
+	configErr := configureJetStreamResources(mockJS)
+
+	require.Error(t, configErr)
+	assert.Contains(t, configErr.Error(), "failed to create consumer")
+	assert.True(t, mockJS.streamCreated, "Stream should be created successfully")
+	assert.False(t, mockJS.consumerCreated, "Consumer creation should fail")
 }
