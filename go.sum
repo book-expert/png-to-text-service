@@ -12,6 +12,10 @@ github.com/nnikolov3/configurator v0.1.1 h1:mmo2lyCbUYZ6w/KQtEb6KOk4XNafkv9jPE+K
 github.com/nnikolov3/configurator v0.1.1/go.mod h1:DYXqWgDqX0tjnGbuFLbtqrtfnpHEjAsZfj/ZFBusUlI=
 github.com/nnikolov3/logger v0.1.1 h1:SwceKC0HG3kf8LpO5m0A3vgd2S1Tjg1kGyxOO6Ms1rg=
 github.com/nnikolov3/logger v0.1.1/go.mod h1:ZJ2+0pO5QviBjMNNuDdroEPfQFPc4SuCUEV5/PCQ7Uk=
+github.com/nnikolov3/prompt-builder v0.1.1 h1:Wjb7w+lxaBxeHSkIB8INjn+0Tnh8NaHw+kNTnHdlz6M=
+github.com/nnikolov3/prompt-builder v0.1.1/go.mod h1:CtX1xQYQ78Bv4ByFIDqIhaCxdYWSGyHdJBmnOx+wvrc=
+github.com/nnikolov3/prompt-builder v0.1.2 h1:NOjSmwOgI+hVmvofBBVeimNcg+3XgS7OorcaxtI7kTA=
+github.com/nnikolov3/prompt-builder v0.1.2/go.mod h1:CtX1xQYQ78Bv4ByFIDqIhaCxdYWSGyHdJBmnOx+wvrc=
 github.com/pelletier/go-toml/v2 v2.2.4 h1:mye9XuhQ6gvn5h28+VilKrrPoQVanw5PMw/TB0t5Ec4=
 github.com/pelletier/go-toml/v2 v2.2.4/go.mod h1:2gIqNv+qfxSVS7cM2xJQKtLSTLUE9V8t9Stt+h56mCY=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=

@@ -3,4 +3,5 @@
 /.claude/
 /.gitignore
 /.git/
-/test_artifacts/*
+/test_artifacts/
+/logs/

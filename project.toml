@@ -1,6 +1,5 @@
 # ========================================================================
 # PNG-TO-TEXT-SERVICE CONFIGURATION
-# Unified PNG → OCR → AI Augmentation Pipeline
 # ========================================================================
 [project]
 name = "png-to-text-service"
@@ -11,8 +10,8 @@ description = "Unified PNG-to-text service with OCR and AI augmentation"
 # Paths and Directories
 # ========================================================================
 [paths]
-input_dir = "./input"
-output_dir = "./output"
+input_dir = "./test_artifacts/png"
+output_dir = "./test_artifacts/text"
 
 # ========================================================================
 # Processing Settings
@@ -28,8 +27,8 @@ skip_existing = true
 # ========================================================================
 [tesseract]
 language = "eng+equ"
-oem = 3  # auto (LSTM + legacy fallback for compatibility)
-psm = 3  # fully automatic page segmentation (no OSD, more robust)
+oem = 3
+psm = 3
 dpi = 300
 timeout_seconds = 120
 
@@ -38,13 +37,13 @@ timeout_seconds = 120
 # ========================================================================
 [gemini]
 api_key_variable = "GEMINI_API_KEY"
-models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"]
+models = ["gemini-1.5-flash", "gemini-1.5-pro"]
 max_retries = 3
 retry_delay_seconds = 30
 timeout_seconds = 120
-temperature = 0.1
+temperature = 0.4
 top_k = 40
-top_p = 0.95
+top_p = 0.70
 max_tokens = 8192
 
 # ========================================================================
@@ -57,15 +56,52 @@ enable_file_logging = true
 enable_console_logging = true
 
 # ========================================================================
-# Prompts
-# ========================================================================
-[prompts]
-augmentation = """You are a PhD-level technical narrator. Integrate commentary derived from the page image into the OCR text, producing a coherent narration for text-to-speech. Maintain technical accuracy, describe figures/code/tables as natural prose inserted near the relevant context, avoid markdown, and output continuous paragraphs."""
-
-# ========================================================================
 # Augmentation Configuration
 # ========================================================================
 [augmentation]
-type = "commentary"  # Options: "commentary" (default), "summary"
-custom_prompt = ""   # Optional: Custom prompt to override type-specific defaults
-use_prompt_builder = true  # Enable prompt-builder library for dynamic prompt construction
+type = "commentary"
+custom_prompt = ""
+use_prompt_builder = true
+
+# ========================================================================
+# Prompts
+# ========================================================================
+[prompts]
+augmentation = """
+{{/* This is the master template for the prompt builder */}}
+
+{{/* First, handle the custom prompt override */}}
+{{if eq .mode "custom"}}
+    {{.customPrompt}}
+{{else}}
+    {{/* If not a custom prompt, build the standard one */}}
+    You are an expert technical narrator and editor, tasked with transforming a raw technical document into a polished, narration-ready audiobook script.
+
+    <INSTRUCTIONS>
+    {{if or (eq .mode "summary") (eq .mode "both")}}
+        {{if eq .summaryPosition "top"}}
+            1.  **Summary First:** Begin the output with a section titled "[SUMMARY]" containing a comprehensive summary of the page's key points, including visual elements. Follow it with the main narrative.
+        {{end}}
+    {{end}}
+
+    {{if or (eq .mode "commentary") (eq .mode "both")}}
+        1.  **Integrate Visuals Seamlessly:** Describe all figures and diagrams as natural prose, weaving them directly into the text where they are most relevant. DO NOT explicitly reference them (e.g., "Figure 9-1 shows...").
+    {{end}}
+
+    2.  **Create Narrative Flow:** Rewrite section headers and transitions to be smooth and conversational. Eliminate robotic phrasing.
+    3.  **Handle Acronyms:** When an acronym first appears, spell out the full term with the acronym in parentheses. For subsequent mentions of initialisms like PCI, format them as P. C. I.
+    4.  **Eliminate Artifacts:** You MUST OMIT all headers, footers, and page numbers.
+    5.  **Output Format:** The final output MUST be continuous prose. DO NOT use markdown or headers.
+
+    {{if or (eq .mode "summary") (eq .mode "both")}}
+        {{if eq .summaryPosition "bottom"}}
+            6.  **Summary Last:** Conclude the output with a section titled "[SUMMARY]" containing a comprehensive summary of the page's key points, including visual elements.
+        {{end}}
+    {{end}}
+    </INSTRUCTIONS>
+{{end}}
+
+<OCR_TEXT>
+{{.OCRText}}
+</OCR_TEXT>
+"""
