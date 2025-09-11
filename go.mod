@@ -6,7 +6,7 @@ require (
 	github.com/nats-io/nats.go v1.45.0
 	github.com/nnikolov3/configurator v0.1.1
 	github.com/nnikolov3/logger v0.1.1
-	github.com/nnikolov3/prompt-builder v0.1.2
+	github.com/nnikolov3/prompt-builder v0.1.8
 	github.com/stretchr/testify v1.11.1
 )
 

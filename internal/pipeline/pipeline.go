@@ -3,190 +3,128 @@ package pipeline
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
-	"time"
 
 	"github.com/nnikolov3/logger"
-
 	"github.com/nnikolov3/png-to-text-service/internal/augment"
-	"github.com/nnikolov3/png-to-text-service/internal/config"
 	"github.com/nnikolov3/png-to-text-service/internal/ocr"
 )
 
-const (
-	defaultFilePermission = 0o600
-	defaultDirPermission  = 0o750
-)
-
-var (
-	ErrAPIKeyNotFound       = errors.New("API key not found in environment variable")
-	ErrAugmentationDisabled = errors.New("text augmentation is disabled")
-	pageNumberRegex         = regexp.MustCompile(`(?m)^\s*\d+\s*$`)
-)
-
-type OCRProcessor interface {
-	ProcessPNG(ctx context.Context, pngPath string) (string, error)
-}
-
-type TextAugmenter interface {
-	AugmentTextWithOptions(
-		ctx context.Context,
-		ocrText, imagePath string,
-		opts *augment.AugmentationOptions,
-	) (string, error)
-}
-
+// Pipeline orchestrates the multi-step process of converting a PNG to augmented text.
 type Pipeline struct {
-	ocrProcessor  OCRProcessor
-	textAugmenter TextAugmenter
-	config        *config.Config
-	logger        *logger.Logger
-	enableAugment bool
-	skipExisting  bool
-	workers       int
+	// REMOVED: No more storage dependency.
+	ocr              *ocr.TesseractOCR
+	augmenter        *augment.GeminiProcessor
+	logger           *logger.Logger
+	localTmpDir      string
+	outputDir        string
+	keepTempFiles    bool
+	minTextLength    int
+	augmentationOpts *augment.AugmentationOptions
 }
 
-type ProcessingResult struct {
-	Error   error
-	Success bool
-}
-
-func NewPipeline(cfg *config.Config, log *logger.Logger) (*Pipeline, error) {
-	ocrProcessor := newOCRProcessorFromConfig(cfg, log)
-	textAugmenter, err := newTextAugmenterFromConfig(cfg, log)
-	if err != nil && !errors.Is(err, ErrAugmentationDisabled) {
-		return nil, err
+// New creates a new pipeline with all its dependencies.
+func New(
+	// REMOVED: storage argument is gone.
+	ocr *ocr.TesseractOCR,
+	augmenter *augment.GeminiProcessor,
+	log *logger.Logger,
+	outputDir string,
+	keepTempFiles bool,
+	minTextLength int,
+	augOpts *augment.AugmentationOptions,
+) (*Pipeline, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("could not get current working directory: %w", err)
 	}
+	localTmpDir := filepath.Join(cwd, "tmp")
+	if err := os.MkdirAll(localTmpDir, 0o755); err != nil {
+		return nil, fmt.Errorf("could not create local temp directory '%s': %w", localTmpDir, err)
+	}
+
 	return &Pipeline{
-		ocrProcessor:  ocrProcessor,
-		textAugmenter: textAugmenter,
-		config:        cfg,
-		logger:        log,
-		enableAugment: cfg.Settings.EnableAugmentation,
-		skipExisting:  cfg.Settings.SkipExisting,
-		workers:       cfg.Settings.Workers,
+		ocr:              ocr,
+		augmenter:        augmenter,
+		logger:           log,
+		localTmpDir:      localTmpDir,
+		outputDir:        outputDir,
+		keepTempFiles:    keepTempFiles,
+		minTextLength:    minTextLength,
+		augmentationOpts: augOpts,
 	}, nil
 }
 
-func newOCRProcessorFromConfig(cfg *config.Config, log *logger.Logger) *ocr.Processor {
-	tesseractConfig := ocr.TesseractConfig{
-		Language:       cfg.Tesseract.Language,
-		OEM:            cfg.Tesseract.OEM,
-		PSM:            cfg.Tesseract.PSM,
-		DPI:            cfg.Tesseract.DPI,
-		TimeoutSeconds: cfg.Tesseract.TimeoutSeconds,
-	}
-	return ocr.NewProcessor(tesseractConfig, log)
-}
+// Process handles the full workflow for a single object.
+// MODIFIED: It now accepts the raw pngData directly.
+func (p *Pipeline) Process(ctx context.Context, objectID string, pngData []byte) error {
+	p.logger.Info("Processing job for object: %s", objectID)
 
-func newTextAugmenterFromConfig(
-	cfg *config.Config,
-	log *logger.Logger,
-) (*augment.GeminiProcessor, error) {
-	if !cfg.Settings.EnableAugmentation {
-		return nil, ErrAugmentationDisabled
-	}
-	apiKey := cfg.GetAPIKey()
-	if apiKey == "" {
-		return nil, fmt.Errorf(
-			"API key not found in environment variable %s: %w",
-			cfg.Gemini.APIKeyVariable,
-			ErrAPIKeyNotFound,
-		)
-	}
-	geminiConfig := augment.GeminiConfig{
-		APIKey:            apiKey,
-		Models:            cfg.Gemini.Models,
-		MaxRetries:        cfg.Gemini.MaxRetries,
-		RetryDelaySeconds: cfg.Gemini.RetryDelaySeconds,
-		TimeoutSeconds:    cfg.Gemini.TimeoutSeconds,
-		Temperature:       cfg.Gemini.Temperature,
-		TopK:              cfg.Gemini.TopK,
-		TopP:              cfg.Gemini.TopP,
-		MaxTokens:         cfg.Gemini.MaxTokens,
-		PromptTemplate:    cfg.Prompts.Augmentation,
-		UsePromptBuilder:  cfg.Augmentation.UsePromptBuilder,
-	}
-	return augment.NewGeminiProcessor(&geminiConfig, log), nil
-}
+	// REMOVED: The call to storage.GetObject is no longer needed.
 
-func cleanPageNumbers(text string) string {
-	return pageNumberRegex.ReplaceAllString(text, "")
-}
-
-func (p *Pipeline) ProcessSingle(
-	ctx context.Context,
-	pngPath, outputPath string,
-	opts *augment.AugmentationOptions,
-) error {
-	startTime := time.Now()
-	p.logger.Info("Processing single file: %s -> %s", pngPath, outputPath)
-	outputDir := filepath.Dir(outputPath)
-	if err := os.MkdirAll(outputDir, defaultDirPermission); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
-	}
-	result := p.processFile(ctx, pngPath, outputPath, opts)
-	duration := time.Since(startTime)
-	if result.Success {
-		p.logger.Success("Processed %s in %v", filepath.Base(pngPath), duration)
-	} else {
-		p.logger.Error("Failed to process %s: %v", filepath.Base(pngPath), result.Error)
-	}
-	return result.Error
-}
-
-func (p *Pipeline) processFile(
-	ctx context.Context,
-	pngPath, outputPath string,
-	opts *augment.AugmentationOptions,
-) ProcessingResult {
-	if p.skipExisting {
-		if _, err := os.Stat(outputPath); err == nil {
-			p.logger.Info("Skipping existing file: %s", filepath.Base(outputPath))
-			return ProcessingResult{Success: true}
-		}
-	}
-
-	p.logger.Info("Running OCR on %s", filepath.Base(pngPath))
-	ocrText, err := p.ocrProcessor.ProcessPNG(ctx, pngPath)
+	tmpFile, err := p.createTempFile(pngData)
 	if err != nil {
-		return ProcessingResult{Success: false, Error: fmt.Errorf("OCR processing: %w", err)}
+		return fmt.Errorf("create temp file for '%s': %w", objectID, err)
+	}
+	tmpFileName := tmpFile.Name()
+
+	if !p.keepTempFiles {
+		defer func() {
+			if err := os.Remove(tmpFileName); err != nil {
+				p.logger.Error("Failed to remove temporary file %s: %v", tmpFileName, err)
+			}
+		}()
 	}
 
-	cleanedText := cleanPageNumbers(ocrText)
-	finalText := cleanedText
+	p.logger.Info("Running OCR on temporary file: %s", tmpFileName)
 
-	if p.enableAugment && p.textAugmenter != nil {
-		p.logger.Info("Augmenting text for %s", filepath.Base(pngPath))
-		augmentedText, err := p.textAugmenter.AugmentTextWithOptions(
-			ctx,
-			cleanedText,
-			pngPath,
-			opts,
+	ocrText, err := p.ocr.Process(ctx, tmpFileName)
+	if err != nil {
+		return fmt.Errorf("OCR processing: %w", err)
+	}
+
+	cleanedText := cleanText(ocrText)
+	if len(cleanedText) < p.minTextLength {
+		p.logger.Warn(
+			"OCR text for %s is too short (%d chars), skipping augmentation.",
+			objectID,
+			len(cleanedText),
 		)
+	} else {
+		p.logger.Info("Augmenting text for %s", objectID)
+		augmentedText, err := p.augmenter.AugmentTextWithOptions(ctx, cleanedText, tmpFileName, p.augmentationOpts)
 		if err != nil {
-			p.logger.Warn(
-				"Text augmentation failed for %s: %v. Using cleaned OCR text as fallback.",
-				filepath.Base(pngPath),
-				err,
-			)
+			p.logger.Warn("Text augmentation failed for %s: %v. Using cleaned OCR text as fallback.", objectID, err)
 		} else {
-			finalText = augmentedText
+			cleanedText = augmentedText
 		}
 	}
 
-	if err := os.WriteFile(outputPath, []byte(finalText), defaultFilePermission); err != nil {
-		return ProcessingResult{Success: false, Error: fmt.Errorf("write output: %w", err)}
+	outputFileName := generateOutputFileName(objectID)
+	outputFilePath := filepath.Join(p.outputDir, outputFileName)
+	if err := os.WriteFile(outputFilePath, []byte(cleanedText), 0o644); err != nil {
+		return fmt.Errorf("write output file %s: %w", outputFilePath, err)
 	}
 
-	p.logger.Info(
-		"Successfully processed %s -> %s",
-		filepath.Base(pngPath),
-		filepath.Base(outputPath),
-	)
-	return ProcessingResult{Success: true}
+	p.logger.Info("Successfully wrote output for %s -> %s", objectID, outputFileName)
+	return nil
+}
+
+func (p *Pipeline) createTempFile(data []byte) (*os.File, error) {
+	tmpFile, err := os.CreateTemp(p.localTmpDir, "ocr-*.png")
+	if err != nil {
+		return nil, fmt.Errorf("create temp file: %w", err)
+	}
+
+	if _, err := tmpFile.Write(data); err != nil {
+		tmpFile.Close()
+		return nil, fmt.Errorf("write to temp file: %w", err)
+	}
+
+	if err := tmpFile.Close(); err != nil {
+		return nil, fmt.Errorf("close temp file: %w", err)
+	}
+	return tmpFile, nil
 }

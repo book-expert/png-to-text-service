@@ -51,7 +51,7 @@ max_tokens = 8192
 # ========================================================================
 [logging]
 level = "info"
-dir = "./logs"
+dir = "/tmp/logs"
 enable_file_logging = true
 enable_console_logging = true
 

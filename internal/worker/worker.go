@@ -1,0 +1,155 @@
+// ./internal/worker/worker.go
+package worker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strconv"
+	"time"
+
+	"github.com/nats-io/nats.go"
+	"github.com/nnikolov3/logger"
+)
+
+// Pipeline defines the interface for the processing logic.
+type Pipeline interface {
+	Process(ctx context.Context, objectID string, data []byte) error
+}
+
+// NatsWorker manages the NATS connection and message consumption.
+type NatsWorker struct {
+	js         nats.JetStreamContext
+	pipeline   Pipeline
+	nc         *nats.Conn
+	logger     *logger.Logger
+	streamName string
+	subject    string
+	consumer   string
+}
+
+// New creates a new NatsWorker.
+func New(
+	natsURL, streamName, subject, consumer string,
+	pipeline Pipeline,
+	log *logger.Logger,
+) (*NatsWorker, error) {
+	nc, err := nats.Connect(
+		natsURL,
+		nats.Timeout(10*time.Second),
+		nats.RetryOnFailedConnect(true),
+		nats.MaxReconnects(5),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connect to NATS: %w", err)
+	}
+
+	log.Info("Connected to NATS server at %s", natsURL)
+
+	js, err := nc.JetStream()
+	if err != nil {
+		return nil, fmt.Errorf("get JetStream context: %w", err)
+	}
+
+	// Ensure the stream exists.
+	if _, err := js.StreamInfo(streamName); err != nil {
+		return nil, fmt.Errorf("stream '%s' not found: %w", streamName, err)
+	}
+
+	log.Info("Found stream '%s'.", streamName)
+
+	return &NatsWorker{
+		nc:         nc,
+		js:         js,
+		streamName: streamName,
+		subject:    subject,
+		consumer:   consumer,
+		pipeline:   pipeline,
+		logger:     log,
+	}, nil
+}
+
+// Run starts the worker's message processing loop.
+func (w *NatsWorker) Run(ctx context.Context) error {
+	sub, err := w.js.PullSubscribe(
+		w.subject,
+		w.consumer,
+		nats.BindStream(w.streamName),
+	)
+	if err != nil {
+		return fmt.Errorf("pull subscribe: %w", err)
+	}
+
+	w.logger.Info("Consumer '%s' is ready.", w.consumer)
+	w.logger.Info("Worker is running, listening for jobs on '%s'...", w.subject)
+
+	for {
+		select {
+		case <-ctx.Done():
+			w.logger.Info("Context canceled, worker shutting down.")
+
+			return nil
+		default:
+			msgs, err := sub.Fetch(1, nats.MaxWait(5*time.Second))
+			if err != nil {
+				if errors.Is(err, nats.ErrTimeout) {
+					continue // No messages, just loop again.
+				}
+
+				w.logger.Error("Fetch messages: %v", err)
+
+				continue
+			}
+
+			if len(msgs) > 0 {
+				w.handleMsg(ctx, msgs[0])
+			}
+		}
+	}
+}
+
+// handleMsg processes a single NATS message.
+func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
+	startTime := time.Now()
+
+	// MODIFIED: We no longer parse JSON. The message data is the raw PNG.
+	// We create a unique ID from the message metadata for logging and filenames.
+	meta, err := msg.Metadata()
+	if err != nil {
+		w.logger.Error(
+			"Failed to get message metadata: %v. Acknowledging to discard.",
+			err,
+		)
+		msg.Ack()
+
+		return
+	}
+
+	objectID := "seq-" + strconv.FormatUint(meta.Sequence.Stream, 10)
+
+	// The message payload IS the PNG data.
+	pngData := msg.Data
+	if len(pngData) == 0 {
+		w.logger.Warn(
+			"Received empty message for object %s. Acknowledging to discard.",
+			objectID,
+		)
+		msg.Ack()
+
+		return
+	}
+
+	// Call the pipeline with the data directly.
+	if err := w.pipeline.Process(ctx, objectID, pngData); err != nil {
+		w.logger.Error("Pipeline failed for '%s': %v", objectID, err)
+		// We still acknowledge the message to prevent it from being re-processed
+		// endlessly.
+		// A more advanced system might use a dead-letter queue here.
+		msg.Ack()
+
+		return
+	}
+
+	w.logger.Success("Processed %s in %s", objectID, time.Since(startTime))
+	msg.Ack()
+}

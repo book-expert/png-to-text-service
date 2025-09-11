@@ -3,232 +3,137 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
+	"strconv"
 	"syscall"
 	"time"
 
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nnikolov3/logger"
-
 	"github.com/nnikolov3/png-to-text-service/internal/augment"
-	"github.com/nnikolov3/png-to-text-service/internal/config"
+	"github.com/nnikolov3/png-to-text-service/internal/ocr"
 	"github.com/nnikolov3/png-to-text-service/internal/pipeline"
+	"github.com/nnikolov3/png-to-text-service/internal/worker"
 )
-
-const (
-	pngCreatedSubject  = "png.created"
-	pngConsumerName    = "png-text-workers"
-	pngStreamName      = "PNG_PROCESSING"
-	pngObjectStoreName = "PNG_FILES"
-)
-
-// PngJob defines the structure for incoming job messages.
-type PngJob struct {
-	ObjectName          string                      `json:"objectName"`
-	AugmentationOptions augment.AugmentationOptions `json:"augmentationOptions"`
-}
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	log := logger.New(true)
 
-	appConfig, err := loadConfiguration()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	cfg, err := loadConfig(log)
 	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		log.Fatal("Failed to load configuration: %v", err)
 	}
 
-	appLogger, err := initializeLogger(appConfig)
-	if err != nil {
-		log.Fatalf("Failed to initialize logger: %v", err)
+	// REMOVED: All MinIO and storage client initialization is gone.
+
+	// Initialize OCR processor
+	ocrProcessor := ocr.New(cfg.TesseractPath, cfg.TesseractLang, cfg.TesseractDPI)
+
+	// Initialize Gemini processor for text augmentation
+	geminiCfg := &augment.GeminiConfig{
+		APIKey:           cfg.GeminiAPIKey,
+		Models:           []string{"gemini-1.5-flash-latest"},
+		Temperature:      0.7,
+		TimeoutSeconds:   60,
+		MaxRetries:       3,
+		UsePromptBuilder: true,
 	}
-	defer appLogger.Close()
+	geminiProcessor := augment.NewGeminiProcessor(geminiCfg, log)
 
-	if err := run(ctx, appConfig, appLogger); err != nil {
-		appLogger.Fatal("Fatal application error: %v", err)
-	}
-	appLogger.Info("Application shut down gracefully.")
-}
-
-func run(ctx context.Context, appConfig *config.Config, appLogger *logger.Logger) error {
-	nc, err := nats.Connect(nats.DefaultURL)
-	if err != nil {
-		return fmt.Errorf("failed to connect to NATS: %w", err)
-	}
-	defer nc.Close()
-	appLogger.Info("Connected to NATS server at %s", nc.ConnectedUrl())
-
-	js, err := jetstream.New(nc)
-	if err != nil {
-		return fmt.Errorf("failed to create JetStream context: %w", err)
-	}
-
-	if err := setupJetStream(ctx, js, appLogger); err != nil {
-		return fmt.Errorf("failed to set up JetStream resources: %w", err)
-	}
-
-	consumer, err := js.Consumer(ctx, pngStreamName, pngConsumerName)
-	if err != nil {
-		return fmt.Errorf("failed to get consumer: %w", err)
-	}
-
-	processingPipeline, err := pipeline.NewPipeline(appConfig, appLogger)
-	if err != nil {
-		return fmt.Errorf("failed to create pipeline: %w", err)
-	}
-
-	appLogger.Info("Worker is running, listening for jobs on '%s'...", pngCreatedSubject)
-	return processMessages(ctx, consumer, js, processingPipeline, appConfig)
-}
-
-func setupJetStream(ctx context.Context, js jetstream.JetStream, appLogger *logger.Logger) error {
-	stream, err := js.Stream(ctx, pngStreamName)
-	if err != nil {
-		return fmt.Errorf(
-			"could not get stream handle for '%s': %w. Ensure the producer service is running first",
-			pngStreamName,
-			err,
-		)
-	}
-	appLogger.Info("Found stream '%s'.", pngStreamName)
-
-	_, err = stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
-		Durable:       pngConsumerName,
-		FilterSubject: pngCreatedSubject,
-		AckPolicy:     jetstream.AckExplicitPolicy,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create consumer: %w", err)
-	}
-	appLogger.Info("Consumer '%s' is ready.", pngConsumerName)
-
-	return nil
-}
-
-func processMessages(
-	ctx context.Context,
-	consumer jetstream.Consumer,
-	js jetstream.JetStream,
-	procPipeline *pipeline.Pipeline,
-	appConfig *config.Config,
-) error {
-	pngStore, err := js.ObjectStore(ctx, pngObjectStoreName)
-	if err != nil {
-		return fmt.Errorf("failed to bind to object store '%s': %w", pngObjectStoreName, err)
-	}
-
-	for {
-		if ctx.Err() != nil {
-			return nil
-		}
-		batch, err := consumer.Fetch(1, jetstream.FetchMaxWait(5*time.Second))
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, nats.ErrTimeout) {
-				continue
-			}
-			log.Printf("Error fetching messages: %v", err)
-			continue
-		}
-		for msg := range batch.Messages() {
-			handleMessage(ctx, msg, pngStore, procPipeline, appConfig)
-		}
-		if batch.Error() != nil {
-			log.Printf("Error during message batch processing: %v", batch.Error())
-		}
-	}
-}
-
-func handleMessage(
-	ctx context.Context,
-	msg jetstream.Msg,
-	pngStore jetstream.ObjectStore,
-	procPipeline *pipeline.Pipeline,
-	appConfig *config.Config,
-) {
-	var job PngJob
-	if err := json.Unmarshal(msg.Data(), &job); err != nil {
-		log.Printf("Failed to unmarshal job JSON: %v. Acknowledging to discard.", err)
-		msg.Ack()
-		return
-	}
-
-	if job.ObjectName == "" {
-		log.Println("Received job with empty object name. Acknowledging to discard.")
-		msg.Ack()
-		return
-	}
-	log.Printf("Received job for PNG object: %s", job.ObjectName)
-	msg.InProgress()
-
-	obj, err := pngStore.Get(ctx, job.ObjectName)
-	if err != nil {
-		log.Printf("Failed to get object '%s': %v", job.ObjectName, err)
-		if errors.Is(err, jetstream.ErrObjectNotFound) {
-			msg.Ack()
-		} else {
-			msg.Nak()
-		}
-		return
-	}
-	defer obj.Close()
-
-	tempFile, err := os.CreateTemp("", "ocr-*.png")
-	if err != nil {
-		log.Printf("Failed to create temp file for '%s': %v", job.ObjectName, err)
-		msg.Nak()
-		return
-	}
-	defer os.Remove(tempFile.Name())
-
-	if _, err := io.Copy(tempFile, obj); err != nil {
-		log.Printf("Failed to write to temp file for '%s': %v", job.ObjectName, err)
-		tempFile.Close()
-		msg.Nak()
-		return
-	}
-	tempFile.Close()
-
-	txtFileName := strings.TrimSuffix(job.ObjectName, filepath.Ext(job.ObjectName)) + ".txt"
-	finalOutputPath := filepath.Join(appConfig.Paths.OutputDir, txtFileName)
-
-	if err := procPipeline.ProcessSingle(ctx, tempFile.Name(), finalOutputPath, &job.AugmentationOptions); err != nil {
-		log.Printf("Pipeline failed for '%s': %v", job.ObjectName, err)
-		msg.Nak()
-		return
-	}
-
-	if err := msg.Ack(); err != nil {
-		log.Printf("Failed to acknowledge message for '%s': %v", job.ObjectName, err)
-	} else {
-		log.Printf("Successfully processed and acknowledged job for '%s'.", job.ObjectName)
-	}
-}
-
-func loadConfiguration() (*config.Config, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("could not get working directory: %w", err)
-	}
-	_, configPath, err := config.FindProjectRoot(wd)
-	if err != nil {
-		return nil, fmt.Errorf("could not find project configuration: %w", err)
-	}
-	return config.Load(configPath)
-}
-
-func initializeLogger(appConfig *config.Config) (*logger.Logger, error) {
-	logFileName := fmt.Sprintf(
-		"png-to-text-service_%s.log",
-		time.Now().Format("2006-01-02_15-04-05"),
+	// Initialize the main processing Pipeline without the storage client.
+	mainPipeline, err := pipeline.New(
+		ocrProcessor,
+		geminiProcessor,
+		log,
+		cfg.OutputDir,
+		cfg.KeepTempFiles,
+		10, // min text length
+		&augment.AugmentationOptions{Type: "commentary"},
 	)
-	logFilePath := appConfig.GetLogFilePath(logFileName)
-	return logger.New(filepath.Dir(logFilePath), filepath.Base(logFilePath))
+	if err != nil {
+		log.Fatal("Failed to initialize processing pipeline: %v", err)
+	}
+
+	// Initialize the NATS worker
+	natsWorker, err := worker.New(
+		cfg.NatsURL,
+		"PNG_PROCESSING",
+		"png.created",
+		"png-text-workers",
+		mainPipeline,
+		log,
+	)
+	if err != nil {
+		log.Fatal("Failed to initialize NATS worker: %v", err)
+	}
+
+	go func() {
+		log.Info("Starting NATS worker...")
+		if err := natsWorker.Run(ctx); err != nil {
+			log.Error("NATS worker stopped with error: %v", err)
+			cancel()
+		}
+	}()
+
+	<-sigChan
+	log.Info("Shutdown signal received, gracefully shutting down...")
+	cancel()
+	time.Sleep(2 * time.Second)
+	log.Info("Shutdown complete.")
+}
+
+type appConfig struct {
+	NatsURL       string
+	GeminiAPIKey  string
+	TesseractPath string
+	TesseractLang string
+	TesseractDPI  int
+	OutputDir     string
+	KeepTempFiles bool
+}
+
+func loadConfig(log *logger.Logger) (*appConfig, error) {
+	dpi, err := strconv.Atoi(getEnv("TESSERACT_DPI", "300"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid TESSERACT_DPI: %w", err)
+	}
+
+	keepFiles, err := strconv.ParseBool(getEnv("KEEP_TEMP_FILES", "false"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid KEEP_TEMP_FILES: %w", err)
+	}
+
+	cfg := &appConfig{
+		NatsURL:       getEnv("NATS_URL", "nats://127.0.0.1:4222"),
+		GeminiAPIKey:  getEnvOrError("GEMINI_API_KEY"),
+		TesseractPath: getEnv("TESSERACT_PATH", "tesseract"),
+		TesseractLang: getEnv("TESSERACT_LANG", "eng"),
+		TesseractDPI:  dpi,
+		OutputDir:     getEnv("OUTPUT_DIR", "test_artifacts/text"),
+		KeepTempFiles: keepFiles,
+	}
+
+	if cfg.GeminiAPIKey == "" {
+		return nil, fmt.Errorf("GEMINI_API_KEY environment variable is required")
+	}
+
+	log.Info("Configuration loaded successfully")
+	return cfg, nil
+}
+
+func getEnv(key, fallback string) string {
+	if value, ok := os.LookupEnv(key); ok {
+		return value
+	}
+	return fallback
+}
+
+func getEnvOrError(key string) string {
+	return getEnv(key, "")
 }
