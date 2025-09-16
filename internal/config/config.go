@@ -41,27 +41,52 @@ const (
 
 // Pre-defined errors for configuration validation.
 var (
-	// ErrInputDirRequired is returned when the input directory path is missing.
-	ErrInputDirRequired = errors.New("paths.input_dir is required")
-	// ErrOutputDirRequired is returned when the output directory path is missing.
-	ErrOutputDirRequired = errors.New("paths.output_dir is required")
-	// ErrAPIKeyVarRequired is returned when the API key variable is required but not
-	// set.
 	ErrAPIKeyVarRequired = errors.New(
 		"gemini.api_key_variable is required when augmentation is enabled",
 	)
 )
 
-// Config represents the complete, validated configuration for the service.
-type Config struct {
-	Project      Project      `toml:"project"`
-	Paths        Paths        `toml:"paths"`
-	Prompts      Prompts      `toml:"prompts"`
-	Augmentation Augmentation `toml:"augmentation"`
-	Logging      Logging      `toml:"logging"`
+// NATSConfig holds all NATS and JetStream settings.
+type NATSConfig struct {
+	URL                      string `toml:"url"`
+	PDFStreamName            string `toml:"pdf_stream_name"`
+	PDFConsumerName          string `toml:"pdf_consumer_name"`
+	PDFCreatedSubject        string `toml:"pdf_created_subject"`
+	PDFObjectStoreBucket     string `toml:"pdf_object_store_bucket"`
+	PNGStreamName            string `toml:"png_stream_name"`
+	PNGConsumerName          string `toml:"png_consumer_name"`
+	PNGCreatedSubject        string `toml:"png_created_subject"`
+	PNGObjectStoreBucket     string `toml:"png_object_store_bucket"`
+	TextStreamName           string `toml:"text_stream_name"`
+	TextObjectStoreBucket    string `toml:"text_object_store_bucket"`
+	TTSStreamName            string `toml:"tts_stream_name"`
+	TTSConsumerName          string `toml:"tts_consumer_name"`
+	TextProcessedSubject     string `toml:"text_processed_subject"`
+	AudioChunkCreatedSubject string `toml:"audio_chunk_created_subject"`
+	AudioObjectStoreBucket   string `toml:"audio_object_store_bucket"`
+	DeadLetterSubject        string `toml:"dead_letter_subject"`
+}
+
+// PathsConfig holds common path configurations.
+type PathsConfig struct {
+	BaseLogsDir string `toml:"base_logs_dir"`
+}
+
+// PNGToTextServiceConfig holds all settings specific to this service.
+type PNGToTextServiceConfig struct {
 	Tesseract    Tesseract    `toml:"tesseract"`
 	Gemini       Gemini       `toml:"gemini"`
-	Settings     Settings     `toml:"settings"`
+	Logging      Logging      `toml:"logging"`
+	Augmentation Augmentation `toml:"augmentation"`
+	Prompts      Prompts      `toml:"prompts"`
+}
+
+// Config represents the complete, validated configuration for the service.
+type Config struct {
+	Project          Project                `toml:"project"`
+	NATS             NATSConfig             `toml:"nats"`
+	Paths            PathsConfig            `toml:"paths"`
+	PNGToTextService PNGToTextServiceConfig `toml:"png_to_text_service"`
 }
 
 // Project contains project metadata.
@@ -69,12 +94,6 @@ type Project struct {
 	Name        string `toml:"name"`
 	Version     string `toml:"version"`
 	Description string `toml:"description"`
-}
-
-// Paths contains input and output directory paths.
-type Paths struct {
-	InputDir  string `toml:"input_dir"`
-	OutputDir string `toml:"output_dir"`
 }
 
 // Prompts contains AI prompts used for augmentation.
@@ -119,14 +138,6 @@ type Gemini struct {
 	MaxTokens         int      `toml:"max_tokens"`
 }
 
-// Settings contains general processing settings for the service.
-type Settings struct {
-	Workers            int  `toml:"workers"`
-	TimeoutSeconds     int  `toml:"timeout_seconds"`
-	EnableAugmentation bool `toml:"enable_augmentation"`
-	SkipExisting       bool `toml:"skip_existing"`
-}
-
 // Load reads, validates, and sets defaults for the configuration.
 // If a configPath is provided, it sets the PROJECT_TOML env var for the configurator to
 // use.
@@ -156,113 +167,77 @@ func Load(configPath string, log *logger.Logger) (*Config, error) {
 }
 
 // GetAPIKey retrieves the Gemini API key from the environment variable specified
-// in the configuration. It returns an empty string if the variable is not set.
+// in the configuration.
 func (c *Config) GetAPIKey() string {
-	if c.Gemini.APIKeyVariable == "" {
+	if c.PNGToTextService.Gemini.APIKeyVariable == "" {
 		return ""
 	}
-
-	return os.Getenv(c.Gemini.APIKeyVariable)
+	return os.Getenv(c.PNGToTextService.Gemini.APIKeyVariable)
 }
 
-// EnsureDirectories creates the input, output, and logging directories if they
-// do not already exist, using the permissions defined by defaultDirPermission.
+// EnsureDirectories creates the logging directory if it does not already exist.
 func (c *Config) EnsureDirectories() error {
-	dirs := []string{c.Paths.InputDir, c.Paths.OutputDir, c.Logging.Dir}
-	for _, dir := range dirs {
-		err := os.MkdirAll(dir, defaultDirPermission)
-		if err != nil {
-			return fmt.Errorf("failed to create directory %s: %w", dir, err)
-		}
+	logDir := c.PNGToTextService.Logging.Dir
+	if logDir == "" {
+		logDir = c.Paths.BaseLogsDir
 	}
-
+	err := os.MkdirAll(logDir, defaultDirPermission)
+	if err != nil {
+		return fmt.Errorf("failed to create log directory %s: %w", logDir, err)
+	}
 	return nil
 }
 
-// GetLogFilePath constructs the full path for a given log filename inside the
-// configured logging directory.
+// GetLogFilePath constructs the full path for a given log filename.
 func (c *Config) GetLogFilePath(filename string) string {
-	return filepath.Join(c.Logging.Dir, filename)
+	logDir := c.PNGToTextService.Logging.Dir
+	if logDir == "" {
+		logDir = c.Paths.BaseLogsDir
+	}
+	return filepath.Join(logDir, filename)
 }
 
 // validate runs all validation and default-setting routines for the configuration.
 func (c *Config) validate() error {
-	err := c.validateRequiredFields()
-	if err != nil {
-		return err
-	}
-
 	c.applyDefaults()
-
-	err = c.validateGeminiSettings()
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// validateRequiredFields checks for the presence of essential configuration values.
-func (c *Config) validateRequiredFields() error {
-	if c.Paths.InputDir == "" {
-		return ErrInputDirRequired
-	}
-
-	if c.Paths.OutputDir == "" {
-		return ErrOutputDirRequired
-	}
-
 	return nil
 }
 
 // applyDefaults sets default values for various configuration sections.
 func (c *Config) applyDefaults() {
-	// Settings defaults
-	if c.Settings.Workers <= 0 {
-		c.Settings.Workers = 4
-	}
-
-	if c.Settings.TimeoutSeconds <= 0 {
-		c.Settings.TimeoutSeconds = 300
-	}
-
 	// Tesseract defaults
-	setStringDefault(&c.Tesseract.Language, "eng")
-	setIntDefault(&c.Tesseract.OEM, defaultTesseractOEM)
-	setIntDefault(&c.Tesseract.PSM, defaultTesseractPSM)
-	setIntDefault(&c.Tesseract.DPI, defaultTesseractDPI)
-	setIntDefault(&c.Tesseract.TimeoutSeconds, defaultTesseractTimeoutSeconds)
+	setStringDefault(&c.PNGToTextService.Tesseract.Language, "eng")
+	setIntDefault(&c.PNGToTextService.Tesseract.OEM, defaultTesseractOEM)
+	setIntDefault(&c.PNGToTextService.Tesseract.PSM, defaultTesseractPSM)
+	setIntDefault(&c.PNGToTextService.Tesseract.DPI, defaultTesseractDPI)
+	setIntDefault(
+		&c.PNGToTextService.Tesseract.TimeoutSeconds,
+		defaultTesseractTimeoutSeconds,
+	)
 
 	// Augmentation defaults
-	setStringDefault(&c.Augmentation.Type, "commentary")
+	setStringDefault(&c.PNGToTextService.Augmentation.Type, "commentary")
 
 	// Logging defaults
-	setStringDefault(&c.Logging.Level, "info")
-	setStringDefault(&c.Logging.Dir, "./logs")
-}
-
-// validateGeminiSettings checks Gemini settings only if augmentation is enabled
-// and applies defaults where necessary.
-func (c *Config) validateGeminiSettings() error {
-	if !c.Settings.EnableAugmentation {
-		return nil
+	setStringDefault(&c.PNGToTextService.Logging.Level, "info")
+	if c.PNGToTextService.Logging.Dir == "" {
+		c.PNGToTextService.Logging.Dir = c.Paths.BaseLogsDir
 	}
 
-	if c.Gemini.APIKeyVariable == "" {
-		return ErrAPIKeyVarRequired
+	// Gemini defaults
+	if len(c.PNGToTextService.Gemini.Models) == 0 {
+		c.PNGToTextService.Gemini.Models = []string{"gemini-1.5-flash"}
 	}
-
-	// Gemini defaults (only applied if augmentation is enabled)
-	if len(c.Gemini.Models) == 0 {
-		c.Gemini.Models = []string{"gemini-1.5-flash"}
-	}
-
-	setIntDefault(&c.Gemini.MaxRetries, defaultGeminiMaxRetries)
-	setIntDefault(&c.Gemini.RetryDelaySeconds, defaultGeminiRetryDelaySeconds)
-	setIntDefault(&c.Gemini.TimeoutSeconds, defaultGeminiTimeoutSeconds)
-	setIntDefault(&c.Gemini.MaxTokens, defaultGeminiMaxTokens)
-
-	return nil
+	setIntDefault(&c.PNGToTextService.Gemini.MaxRetries, defaultGeminiMaxRetries)
+	setIntDefault(
+		&c.PNGToTextService.Gemini.RetryDelaySeconds,
+		defaultGeminiRetryDelaySeconds,
+	)
+	setIntDefault(
+		&c.PNGToTextService.Gemini.TimeoutSeconds,
+		defaultGeminiTimeoutSeconds,
+	)
+	setIntDefault(&c.PNGToTextService.Gemini.MaxTokens, defaultGeminiMaxTokens)
 }
 
 // setStringDefault sets a default string value if the target field is empty.

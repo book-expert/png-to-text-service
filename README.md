@@ -57,32 +57,12 @@ The service is configured via a `project.toml` file and is designed to be run as
 
 ## Usage
 
-The service is run via the command line. The primary mode of operation is as a NATS worker, which is the default behavior when no specific file or directory flags are provided.
+The service is run as a NATS worker. It connects to a NATS server, subscribes to a subject, and processes messages as they arrive.
 
 ```bash
-# Run the service as a NATS worker (requires NATS server)
+# Run the service as a NATS worker (requires NATS server and environment variables set)
 ./bin/png-to-text-service
 ```
-
-For direct processing, you can use the following flags:
-
-```bash
-# Process a single file
-./bin/png-to-text-service -file image.png -output output.txt
-
-# Process all images in a directory
-./bin/png-to-text-service -input ./images -output ./text
-```
-
-### Command Line Options
-
--   `-config string`: Path to the configuration file (defaults to `project.toml`).
--   `-input string`: Input directory to process.
--   `-output string`: Output directory for processed text.
--   `-file string`: Path to a single PNG file to process.
--   `-workers int`: Number of parallel workers for directory processing.
--   `-no-augment`: Disable the AI enhancement step.
--   `-version`: Show the application version.
 
 ## Testing
 

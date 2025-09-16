@@ -2,6 +2,8 @@ package config_test
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,11 +20,8 @@ const (
 	testAPIKeyEnvName     = "GEMINI_API_KEY"
 	testAPIKeySecretValue = "test-key-12345"
 	testProjectName       = "test-service"
-	testInputDir          = "/tmp/test-input"
-	testOutputDir         = "/tmp/test-output"
 	testLogsDirName       = "logs"
 	testLogFileName       = "app.log"
-	nonExistentPath       = "non/existent/path/project.toml"
 	defaultDirPermissions = 0o755
 )
 
@@ -35,7 +34,6 @@ func newTestLogger(t *testing.T) *logger.Logger {
 }
 
 // newTestConfig is a helper that returns a valid, fully-populated config struct.
-// This simplifies test setup and satisfies the exhaustruct linter.
 func newTestConfig(t *testing.T) *config.Config {
 	t.Helper()
 
@@ -47,159 +45,129 @@ func newTestConfig(t *testing.T) *config.Config {
 			Version:     "1.0.0",
 			Description: "Test Description",
 		},
-		Paths: config.Paths{
-			InputDir:  filepath.Join(tmpDir, "input"),
-			OutputDir: filepath.Join(tmpDir, "output"),
+		Paths: config.PathsConfig{
+			BaseLogsDir: filepath.Join(tmpDir, "base_logs"),
 		},
-		Logging: config.Logging{
-			Level:                "info",
-			Dir:                  filepath.Join(tmpDir, testLogsDirName),
-			EnableFileLogging:    true,
-			EnableConsoleLogging: true,
-		},
-		Gemini: config.Gemini{
-			APIKeyVariable:    testAPIKeyEnvName,
-			Models:            []string{"gemini-pro"},
-			MaxRetries:        3,
-			RetryDelaySeconds: 5,
-			TimeoutSeconds:    60,
-			Temperature:       0.5,
-			TopK:              40,
-			TopP:              0.9,
-			MaxTokens:         2048,
-		},
-		Prompts: config.Prompts{
-			Augmentation: "Test prompt",
-		},
-		Augmentation: config.Augmentation{
-			Type:             "commentary",
-			CustomPrompt:     "",
-			UsePromptBuilder: true,
-		},
-		Tesseract: config.Tesseract{
-			Language:       "eng",
-			OEM:            3,
-			PSM:            3,
-			DPI:            300,
-			TimeoutSeconds: 60,
-		},
-		Settings: config.Settings{
-			Workers:            4,
-			TimeoutSeconds:     120,
-			EnableAugmentation: true,
-			SkipExisting:       false,
+		PNGToTextService: config.PNGToTextServiceConfig{
+			Logging: config.Logging{
+				Level: "info",
+				Dir: filepath.Join(
+					tmpDir,
+					testLogsDirName,
+				),
+				EnableFileLogging:    true,
+				EnableConsoleLogging: true,
+			},
+			Gemini: config.Gemini{
+				APIKeyVariable:    testAPIKeyEnvName,
+				Models:            []string{"gemini-pro"},
+				MaxRetries:        3,
+				RetryDelaySeconds: 5,
+				TimeoutSeconds:    60,
+				Temperature:       0.5,
+				TopK:              40,
+				TopP:              0.9,
+				MaxTokens:         2048,
+			},
+			Prompts: config.Prompts{
+				Augmentation: "Test prompt",
+			},
+			Augmentation: config.Augmentation{
+				Type:             "commentary",
+				CustomPrompt:     "",
+				UsePromptBuilder: true,
+			},
+			Tesseract: config.Tesseract{
+				Language:       "eng",
+				OEM:            3,
+				PSM:            3,
+				DPI:            300,
+				TimeoutSeconds: 60,
+			},
 		},
 	}
 }
 
-// createTempConfigFile is a helper to create a temporary TOML file.
-func createTempConfigFile(t *testing.T, content string) string {
-	t.Helper()
-
-	tmpfile, createErr := os.CreateTemp(t.TempDir(), "config.*.toml")
-	require.NoError(t, createErr)
-
-	_, writeErr := tmpfile.WriteString(content)
-	require.NoError(t, writeErr)
-
-	closeErr := tmpfile.Close()
-	require.NoError(t, closeErr)
-
-	return tmpfile.Name()
-}
-
 // TestLoad_Success tests loading a valid configuration file.
 func TestLoad_Success(t *testing.T) {
-	t.Parallel()
 	log := newTestLogger(t)
 
 	validConfigContent := fmt.Sprintf(`
 [project]
 name = "%s"
-[paths]
-input_dir = "%s"
-output_dir = "%s"
-[settings]
-enable_augmentation = true
-[gemini]
-api_key_variable = "%s"`, testProjectName, testInputDir, testOutputDir, testAPIKeyEnvName)
+[png_to_text_service.gemini]
+api_key_variable = "%s"`, testProjectName, testAPIKeyEnvName)
 	configPath := createTempConfigFile(t, validConfigContent)
 
-	cfg, loadErr := config.Load(configPath, log)
+	_, url := startTestServer(t, configPath)
+	t.Setenv("PROJECT_TOML", url)
+
+	cfg, loadErr := config.Load("", log)
 
 	require.NoError(t, loadErr)
 	require.NotNil(t, cfg)
 	assert.Equal(t, testProjectName, cfg.Project.Name)
-	assert.True(t, cfg.Settings.EnableAugmentation)
-	assert.Equal(t, testAPIKeyEnvName, cfg.Gemini.APIKeyVariable)
-}
-
-// TestLoad_MissingRequiredField tests that validation catches a missing input directory.
-func TestLoad_MissingRequiredField(t *testing.T) {
-	t.Parallel()
-	log := newTestLogger(t)
-
-	missingInputDirConfigContent := fmt.Sprintf(`
-[paths]
-output_dir = "%s"`, testOutputDir)
-	configPath := createTempConfigFile(t, missingInputDirConfigContent)
-
-	cfg, loadErr := config.Load(configPath, log)
-
-	require.Error(t, loadErr)
-	require.ErrorIs(t, loadErr, config.ErrInputDirRequired)
-	require.Nil(t, cfg)
-}
-
-// TestLoad_MissingAPIKeyVariable tests validation fails if augmentation is enabled
-// without an API key variable.
-func TestLoad_MissingAPIKeyVariable(t *testing.T) {
-	t.Parallel()
-	log := newTestLogger(t)
-
-	configContent := fmt.Sprintf(`
-[paths]
-input_dir = "%s"
-output_dir = "%s"
-[settings]
-enable_augmentation = true
-[gemini]
-api_key_variable = ""`, testInputDir, testOutputDir)
-	configPath := createTempConfigFile(t, configContent)
-
-	cfg, loadErr := config.Load(configPath, log)
-
-	require.Error(t, loadErr)
-	require.ErrorIs(t, loadErr, config.ErrAPIKeyVarRequired)
-	assert.Nil(t, cfg)
+	assert.Equal(t, testAPIKeyEnvName, cfg.PNGToTextService.Gemini.APIKeyVariable)
 }
 
 // TestLoad_DefaultsApplied tests that default values are set correctly.
 func TestLoad_DefaultsApplied(t *testing.T) {
-	t.Parallel()
 	log := newTestLogger(t)
 
-	configContent := fmt.Sprintf(`
-[paths]
-input_dir = "%s"
-output_dir = "%s"`, testInputDir, testOutputDir)
+	configContent := `
+[project]
+name = "test"`
 	configPath := createTempConfigFile(t, configContent)
 
-	cfg, loadErr := config.Load(configPath, log)
+	_, url := startTestServer(t, configPath)
+	t.Setenv("PROJECT_TOML", url)
+
+	cfg, loadErr := config.Load("", log)
 
 	require.NoError(t, loadErr)
 	require.NotNil(t, cfg)
-	assert.Equal(t, "info", cfg.Logging.Level)
-	assert.Equal(t, 3, cfg.Tesseract.OEM)
-	assert.Equal(t, 4, cfg.Settings.Workers) // Default worker count
+	assert.Equal(t, "info", cfg.PNGToTextService.Logging.Level)
+	assert.Equal(t, 3, cfg.PNGToTextService.Tesseract.OEM)
 }
 
-// TestLoad_FileNotExist tests that Load returns an error for a non-existent file.
-func TestLoad_FileNotExist(t *testing.T) {
-	t.Parallel()
+// TestLoad_URLNotSet tests that Load returns an error if the PROJECT_TOML env var is not
+// set.
+func TestLoad_URLNotSet(t *testing.T) {
 	log := newTestLogger(t)
 
-	cfg, loadErr := config.Load(nonExistentPath, log)
+	// Unset the env var to ensure it's not present
+	t.Setenv("PROJECT_TOML", "")
+
+	cfg, loadErr := config.Load("", log)
+
+	require.Error(t, loadErr)
+	assert.Nil(t, cfg)
+}
+
+// TestLoad_BadURL tests that Load returns an error for a malformed URL.
+func TestLoad_BadURL(t *testing.T) {
+	log := newTestLogger(t)
+
+	// Set the env var to a bad URL
+	t.Setenv("PROJECT_TOML", "http://a b.com")
+
+	cfg, loadErr := config.Load("", log)
+
+	require.Error(t, loadErr)
+	assert.Nil(t, cfg)
+}
+
+// TestLoad_Server404 tests that Load returns an error for a 404.
+func TestLoad_Server404(t *testing.T) {
+	log := newTestLogger(t)
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+
+	t.Setenv("PROJECT_TOML", server.URL)
+
+	cfg, loadErr := config.Load("", log)
+
 	require.Error(t, loadErr)
 	assert.Nil(t, cfg)
 }
@@ -228,48 +196,60 @@ func TestGetAPIKey_NotSet(t *testing.T) {
 
 // TestEnsureDirectories_CreatesAll checks that required directories are created.
 func TestEnsureDirectories_CreatesAll(t *testing.T) {
-	t.Parallel()
-
 	cfg := newTestConfig(t)
 
-	cfg.Logging.Dir = filepath.Join(cfg.Paths.InputDir, "..", "logs-new")
+	// Override log dir to test creation
+	logDir := filepath.Join(t.TempDir(), "new-logs")
+	cfg.PNGToTextService.Logging.Dir = logDir
 
 	ensureErr := cfg.EnsureDirectories()
 	require.NoError(t, ensureErr)
 
-	dirs := []string{cfg.Paths.InputDir, cfg.Paths.OutputDir, cfg.Logging.Dir}
-	for _, dir := range dirs {
-		info, statErr := os.Stat(dir)
-		require.NoError(t, statErr, "Directory should exist: %s", dir)
-		assert.True(t, info.IsDir(), "Path should be a directory: %s", dir)
-	}
-}
-
-// TestEnsureDirectories_SucceedsOnExisting verifies the function succeeds if paths exist.
-func TestEnsureDirectories_SucceedsOnExisting(t *testing.T) {
-	t.Parallel()
-
-	cfg := newTestConfig(t)
-	require.NoError(t, os.MkdirAll(cfg.Paths.InputDir, defaultDirPermissions))
-	require.NoError(t, os.MkdirAll(cfg.Paths.OutputDir, defaultDirPermissions))
-
-	ensureErr := cfg.EnsureDirectories()
-
-	assert.NoError(
-		t,
-		ensureErr,
-		"Function should succeed even if directories already exist.",
-	)
+	info, statErr := os.Stat(logDir)
+	require.NoError(t, statErr, "Log directory should exist: %s", logDir)
+	assert.True(t, info.IsDir(), "Path should be a directory: %s", logDir)
 }
 
 // TestGetLogFilePath tests the construction of a log file path.
 func TestGetLogFilePath(t *testing.T) {
-	t.Parallel()
-
 	cfg := newTestConfig(t)
-	expectedPath := filepath.Join(cfg.Logging.Dir, testLogFileName)
+	expectedPath := filepath.Join(cfg.PNGToTextService.Logging.Dir, testLogFileName)
 
 	actualPath := cfg.GetLogFilePath(testLogFileName)
 
 	assert.Equal(t, expectedPath, actualPath)
+}
+
+// createTempConfigFile creates a temporary TOML config file and returns its path.
+func createTempConfigFile(t *testing.T, content string) string {
+	t.Helper()
+
+	tmpFile, err := os.CreateTemp(t.TempDir(), "config.*.toml")
+	require.NoError(t, err)
+
+	_, err = tmpFile.WriteString(content)
+	require.NoError(t, err)
+
+	err = tmpFile.Close()
+	require.NoError(t, err)
+
+	return tmpFile.Name()
+}
+
+// startTestServer starts a local HTTP server to serve a given file path.
+// It returns the server instance and the URL where the file is served.
+func startTestServer(t *testing.T, filePath string) (*httptest.Server, string) {
+	t.Helper()
+
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, filePath)
+		}),
+	)
+
+	url := fmt.Sprintf("%s/%s", server.URL, filepath.Base(filePath))
+
+	t.Cleanup(server.Close)
+
+	return server, url
 }

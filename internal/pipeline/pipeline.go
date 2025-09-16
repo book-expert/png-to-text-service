@@ -20,7 +20,6 @@ type Pipeline struct {
 	augmenter        *augment.GeminiProcessor
 	logger           *logger.Logger
 	localTmpDir      string
-	outputDir        string
 	keepTempFiles    bool
 	minTextLength    int
 	augmentationOpts *augment.AugmentationOptions
@@ -32,7 +31,6 @@ func New(
 	ocr *ocr.Processor,
 	augmenter *augment.GeminiProcessor,
 	log *logger.Logger,
-	outputDir string,
 	keepTempFiles bool,
 	minTextLength int,
 	augOpts *augment.AugmentationOptions,
@@ -55,7 +53,6 @@ func New(
 		augmenter:        augmenter,
 		logger:           log,
 		localTmpDir:      localTmpDir,
-		outputDir:        outputDir,
 		keepTempFiles:    keepTempFiles,
 		minTextLength:    minTextLength,
 		augmentationOpts: augOpts,
@@ -64,14 +61,18 @@ func New(
 
 // Process handles the full workflow for a single object.
 // MODIFIED: It now accepts the raw pngData directly.
-func (p *Pipeline) Process(ctx context.Context, objectID string, pngData []byte) error {
+func (p *Pipeline) Process(
+	ctx context.Context,
+	objectID string,
+	pngData []byte,
+) (string, error) {
 	p.logger.Info("Processing job for object: %s", objectID)
 
 	// REMOVED: The call to storage.GetObject is no longer needed.
 
 	tmpFile, err := p.createTempFile(pngData)
 	if err != nil {
-		return fmt.Errorf("create temp file for '%s': %w", objectID, err)
+		return "", fmt.Errorf("create temp file for '%s': %w", objectID, err)
 	}
 	tmpFileName := tmpFile.Name()
 
@@ -91,7 +92,7 @@ func (p *Pipeline) Process(ctx context.Context, objectID string, pngData []byte)
 
 	cleanedText, err := p.ocr.ProcessPNG(ctx, tmpFileName)
 	if err != nil {
-		return fmt.Errorf("OCR processing: %w", err)
+		return "", fmt.Errorf("OCR processing: %w", err)
 	}
 
 	if len(cleanedText) < p.minTextLength {
@@ -110,14 +111,8 @@ func (p *Pipeline) Process(ctx context.Context, objectID string, pngData []byte)
 		}
 	}
 
-	outputFileName := generateOutputFileName(objectID)
-	outputFilePath := filepath.Join(p.outputDir, outputFileName)
-	if err := os.WriteFile(outputFilePath, []byte(cleanedText), 0o644); err != nil {
-		return fmt.Errorf("write output file %s: %w", outputFilePath, err)
-	}
-
-	p.logger.Info("Successfully wrote output for %s -> %s", objectID, outputFileName)
-	return nil
+	p.logger.Info("Successfully processed object %s", objectID)
+	return cleanedText, nil
 }
 
 func (p *Pipeline) createTempFile(data []byte) (*os.File, error) {
@@ -141,8 +136,4 @@ func (p *Pipeline) createTempFile(data []byte) (*os.File, error) {
 		return nil, fmt.Errorf("close temp file: %w", err)
 	}
 	return tmpFile, nil
-}
-
-func generateOutputFileName(objectID string) string {
-	return objectID + ".txt"
 }

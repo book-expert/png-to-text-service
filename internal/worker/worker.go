@@ -14,23 +14,25 @@ import (
 
 // Pipeline defines the interface for the processing logic.
 type Pipeline interface {
-	Process(ctx context.Context, objectID string, data []byte) error
+	Process(ctx context.Context, objectID string, data []byte) (string, error)
 }
 
 // NatsWorker manages the NATS connection and message consumption.
 type NatsWorker struct {
-	js         nats.JetStreamContext
-	pipeline   Pipeline
-	nc         *nats.Conn
-	logger     *logger.Logger
-	streamName string
-	subject    string
-	consumer   string
+	js                nats.JetStreamContext
+	pipeline          Pipeline
+	nc                *nats.Conn
+	logger            *logger.Logger
+	streamName        string
+	subject           string
+	consumer          string
+	outputSubject     string
+	deadLetterSubject string
 }
 
 // New creates a new NatsWorker.
 func New(
-	natsURL, streamName, subject, consumer string,
+	natsURL, streamName, subject, consumer, outputSubject, deadLetterSubject string,
 	pipeline Pipeline,
 	log *logger.Logger,
 ) (*NatsWorker, error) {
@@ -59,13 +61,15 @@ func New(
 	log.Info("Found stream '%s'.", streamName)
 
 	return &NatsWorker{
-		nc:         nc,
-		js:         js,
-		streamName: streamName,
-		subject:    subject,
-		consumer:   consumer,
-		pipeline:   pipeline,
-		logger:     log,
+		nc:                nc,
+		js:                js,
+		streamName:        streamName,
+		subject:           subject,
+		consumer:          consumer,
+		pipeline:          pipeline,
+		logger:            log,
+		outputSubject:     outputSubject,
+		deadLetterSubject: deadLetterSubject,
 	}, nil
 }
 
@@ -112,8 +116,6 @@ func (w *NatsWorker) Run(ctx context.Context) error {
 func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 	startTime := time.Now()
 
-	// MODIFIED: We no longer parse JSON. The message data is the raw PNG.
-	// We create a unique ID from the message metadata for logging and filenames.
 	meta, err := msg.Metadata()
 	if err != nil {
 		w.logger.Error(
@@ -129,7 +131,6 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 
 	objectID := "seq-" + strconv.FormatUint(meta.Sequence.Stream, 10)
 
-	// The message payload IS the PNG data.
 	pngData := msg.Data
 	if len(pngData) == 0 {
 		w.logger.Warn(
@@ -147,9 +148,36 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 		return
 	}
 
-	// Call the pipeline with the data directly.
-	if err := w.pipeline.Process(ctx, objectID, pngData); err != nil {
+	processedText, err := w.pipeline.Process(ctx, objectID, pngData)
+	if err != nil {
 		w.logger.Error("Pipeline failed for '%s': %v", objectID, err)
+		// Publish to dead-letter subject
+		if _, pubErr := w.js.Publish(w.deadLetterSubject, msg.Data); pubErr != nil {
+			w.logger.Error(
+				"Failed to publish message to dead-letter subject for object %s: %v",
+				objectID,
+				pubErr,
+			)
+		}
+
+		if ackErr := msg.Ack(); ackErr != nil {
+			w.logger.Error(
+				"failed to acknowledge failed message for object %s: %v",
+				objectID,
+				ackErr,
+			)
+		}
+
+		return
+	}
+
+	// Publish the processed text to the output subject.
+	if _, err := w.js.Publish(w.outputSubject, []byte(processedText)); err != nil {
+		w.logger.Error(
+			"Failed to publish processed text for object %s: %v",
+			objectID,
+			err,
+		)
 		// We still acknowledge the message to prevent it from being re-processed
 		// endlessly.
 		// A more advanced system might use a dead-letter queue here.
@@ -160,7 +188,6 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 				err,
 			)
 		}
-
 		return
 	}
 

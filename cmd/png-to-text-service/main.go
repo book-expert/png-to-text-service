@@ -19,9 +19,23 @@ import (
 )
 
 func main() {
-	log, err := logger.New(os.TempDir(), "png-to-text-service.log")
+	// A temporary logger for the bootstrap process
+	log, err := logger.New(os.TempDir(), "png-to-text-bootstrap.log")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create logger: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Failed to create bootstrap logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Load configuration using the central configurator
+	cfg, err := config.Load("", log)
+	if err != nil {
+		log.Fatal("Failed to load configuration: %v", err)
+	}
+
+	// Initialize the final logger based on the loaded configuration
+	log, err = logger.New(cfg.Paths.BaseLogsDir, "png-to-text-service.log")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create final logger: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -30,69 +44,63 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	cfg, err := config.Load("", log)
-	if err != nil {
-		log.Fatal("Failed to load configuration: %v", err)
-	}
-
-	// Initialize OCR processor
+	// Initialize OCR processor from configuration
 	ocrCfg := ocr.TesseractConfig{
-		Language:       cfg.Tesseract.Language,
-		OEM:            cfg.Tesseract.OEM,
-		PSM:            cfg.Tesseract.PSM,
-		DPI:            cfg.Tesseract.DPI,
-		TimeoutSeconds: cfg.Tesseract.TimeoutSeconds,
+		Language:       cfg.PNGToTextService.Tesseract.Language,
+		OEM:            cfg.PNGToTextService.Tesseract.OEM,
+		PSM:            cfg.PNGToTextService.Tesseract.PSM,
+		DPI:            cfg.PNGToTextService.Tesseract.DPI,
+		TimeoutSeconds: cfg.PNGToTextService.Tesseract.TimeoutSeconds,
 	}
 	ocrProcessor := ocr.NewProcessor(ocrCfg, log)
 
-	// Initialize Gemini processor for text augmentation
+	// Initialize Gemini processor from configuration
 	geminiAPIKey := cfg.GetAPIKey()
 	if geminiAPIKey == "" {
 		log.Fatal(
 			"Failed to get Gemini API key. Ensure %s is set.",
-			cfg.Gemini.APIKeyVariable,
+			cfg.PNGToTextService.Gemini.APIKeyVariable,
 		)
 	}
 	geminiCfg := &augment.GeminiConfig{
 		APIKey:            geminiAPIKey,
-		Models:            cfg.Gemini.Models,
-		Temperature:       cfg.Gemini.Temperature,
-		TimeoutSeconds:    cfg.Gemini.TimeoutSeconds,
-		MaxRetries:        cfg.Gemini.MaxRetries,
-		UsePromptBuilder:  cfg.Augmentation.UsePromptBuilder,
-		TopK:              cfg.Gemini.TopK,
-		TopP:              cfg.Gemini.TopP,
-		MaxTokens:         cfg.Gemini.MaxTokens,
-		RetryDelaySeconds: cfg.Gemini.RetryDelaySeconds,
+		Models:            cfg.PNGToTextService.Gemini.Models,
+		Temperature:       cfg.PNGToTextService.Gemini.Temperature,
+		TimeoutSeconds:    cfg.PNGToTextService.Gemini.TimeoutSeconds,
+		MaxRetries:        cfg.PNGToTextService.Gemini.MaxRetries,
+		UsePromptBuilder:  cfg.PNGToTextService.Augmentation.UsePromptBuilder,
+		TopK:              cfg.PNGToTextService.Gemini.TopK,
+		TopP:              cfg.PNGToTextService.Gemini.TopP,
+		MaxTokens:         cfg.PNGToTextService.Gemini.MaxTokens,
+		RetryDelaySeconds: cfg.PNGToTextService.Gemini.RetryDelaySeconds,
 	}
 	geminiProcessor := augment.NewGeminiProcessor(geminiCfg, log)
 
-	// Initialize the main processing Pipeline
 	mainPipeline, err := pipeline.New(
 		ocrProcessor,
 		geminiProcessor,
 		log,
-		cfg.Paths.OutputDir,
-		false, // keepTempFiles is a debug setting, not in project.toml
+		false, // keepTempFiles is a debug-only setting.
 		10,    // minTextLength
 		&augment.AugmentationOptions{
-			Type:         augment.AugmentationType(cfg.Augmentation.Type),
-			CustomPrompt: cfg.Augmentation.CustomPrompt,
+			Type: augment.AugmentationType(
+				cfg.PNGToTextService.Augmentation.Type,
+			),
+			CustomPrompt: cfg.PNGToTextService.Augmentation.CustomPrompt,
 		},
 	)
 	if err != nil {
 		log.Fatal("Failed to initialize processing pipeline: %v", err)
 	}
 
-	// NATS URL is sourced from environment as it's infrastructure-specific
-	natsURL := getEnv("NATS_URL", "nats://127.0.0.1:4222")
-
-	// Initialize the NATS worker
+	// Initialize the NATS worker from configuration
 	natsWorker, err := worker.New(
-		natsURL,
-		"PNG_PROCESSING",
-		"png.created",
-		"png-text-workers",
+		cfg.NATS.URL,
+		cfg.NATS.PNGStreamName,
+		cfg.NATS.PNGCreatedSubject,
+		cfg.NATS.PNGConsumerName,
+		cfg.NATS.TextProcessedSubject,
+		cfg.NATS.DeadLetterSubject,
 		mainPipeline,
 		log,
 	)
@@ -113,13 +121,4 @@ func main() {
 	cancel()
 	time.Sleep(2 * time.Second)
 	log.Info("Shutdown complete.")
-}
-
-// getEnv is a helper to read an environment variable with a fallback.
-// Kept for infrastructure-specific settings like NATS_URL.
-func getEnv(key, fallback string) string {
-	if value, ok := os.LookupEnv(key); ok {
-		return value
-	}
-	return fallback
 }
