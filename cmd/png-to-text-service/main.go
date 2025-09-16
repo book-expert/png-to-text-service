@@ -6,63 +6,90 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 
-	"github.com/nnikolov3/logger"
-	"github.com/nnikolov3/png-to-text-service/internal/augment"
-	"github.com/nnikolov3/png-to-text-service/internal/ocr"
-	"github.com/nnikolov3/png-to-text-service/internal/pipeline"
-	"github.com/nnikolov3/png-to-text-service/internal/worker"
+	"github.com/book-expert/logger"
+
+	"github.com/book-expert/png-to-text-service/internal/augment"
+	"github.com/book-expert/png-to-text-service/internal/config"
+	"github.com/book-expert/png-to-text-service/internal/ocr"
+	"github.com/book-expert/png-to-text-service/internal/pipeline"
+	"github.com/book-expert/png-to-text-service/internal/worker"
 )
 
 func main() {
-	log := logger.New(true)
+	log, err := logger.New(os.TempDir(), "png-to-text-service.log")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create logger: %v\n", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	cfg, err := loadConfig(log)
+	cfg, err := config.Load("", log)
 	if err != nil {
 		log.Fatal("Failed to load configuration: %v", err)
 	}
 
-	// REMOVED: All MinIO and storage client initialization is gone.
-
 	// Initialize OCR processor
-	ocrProcessor := ocr.New(cfg.TesseractPath, cfg.TesseractLang, cfg.TesseractDPI)
+	ocrCfg := ocr.TesseractConfig{
+		Language:       cfg.Tesseract.Language,
+		OEM:            cfg.Tesseract.OEM,
+		PSM:            cfg.Tesseract.PSM,
+		DPI:            cfg.Tesseract.DPI,
+		TimeoutSeconds: cfg.Tesseract.TimeoutSeconds,
+	}
+	ocrProcessor := ocr.NewProcessor(ocrCfg, log)
 
 	// Initialize Gemini processor for text augmentation
+	geminiAPIKey := cfg.GetAPIKey()
+	if geminiAPIKey == "" {
+		log.Fatal(
+			"Failed to get Gemini API key. Ensure %s is set.",
+			cfg.Gemini.APIKeyVariable,
+		)
+	}
 	geminiCfg := &augment.GeminiConfig{
-		APIKey:           cfg.GeminiAPIKey,
-		Models:           []string{"gemini-1.5-flash-latest"},
-		Temperature:      0.7,
-		TimeoutSeconds:   60,
-		MaxRetries:       3,
-		UsePromptBuilder: true,
+		APIKey:            geminiAPIKey,
+		Models:            cfg.Gemini.Models,
+		Temperature:       cfg.Gemini.Temperature,
+		TimeoutSeconds:    cfg.Gemini.TimeoutSeconds,
+		MaxRetries:        cfg.Gemini.MaxRetries,
+		UsePromptBuilder:  cfg.Augmentation.UsePromptBuilder,
+		TopK:              cfg.Gemini.TopK,
+		TopP:              cfg.Gemini.TopP,
+		MaxTokens:         cfg.Gemini.MaxTokens,
+		RetryDelaySeconds: cfg.Gemini.RetryDelaySeconds,
 	}
 	geminiProcessor := augment.NewGeminiProcessor(geminiCfg, log)
 
-	// Initialize the main processing Pipeline without the storage client.
+	// Initialize the main processing Pipeline
 	mainPipeline, err := pipeline.New(
 		ocrProcessor,
 		geminiProcessor,
 		log,
-		cfg.OutputDir,
-		cfg.KeepTempFiles,
-		10, // min text length
-		&augment.AugmentationOptions{Type: "commentary"},
+		cfg.Paths.OutputDir,
+		false, // keepTempFiles is a debug setting, not in project.toml
+		10,    // minTextLength
+		&augment.AugmentationOptions{
+			Type:         augment.AugmentationType(cfg.Augmentation.Type),
+			CustomPrompt: cfg.Augmentation.CustomPrompt,
+		},
 	)
 	if err != nil {
 		log.Fatal("Failed to initialize processing pipeline: %v", err)
 	}
 
+	// NATS URL is sourced from environment as it's infrastructure-specific
+	natsURL := getEnv("NATS_URL", "nats://127.0.0.1:4222")
+
 	// Initialize the NATS worker
 	natsWorker, err := worker.New(
-		cfg.NatsURL,
+		natsURL,
 		"PNG_PROCESSING",
 		"png.created",
 		"png-text-workers",
@@ -88,52 +115,11 @@ func main() {
 	log.Info("Shutdown complete.")
 }
 
-type appConfig struct {
-	NatsURL       string
-	GeminiAPIKey  string
-	TesseractPath string
-	TesseractLang string
-	TesseractDPI  int
-	OutputDir     string
-	KeepTempFiles bool
-}
-
-func loadConfig(log *logger.Logger) (*appConfig, error) {
-	dpi, err := strconv.Atoi(getEnv("TESSERACT_DPI", "300"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid TESSERACT_DPI: %w", err)
-	}
-
-	keepFiles, err := strconv.ParseBool(getEnv("KEEP_TEMP_FILES", "false"))
-	if err != nil {
-		return nil, fmt.Errorf("invalid KEEP_TEMP_FILES: %w", err)
-	}
-
-	cfg := &appConfig{
-		NatsURL:       getEnv("NATS_URL", "nats://127.0.0.1:4222"),
-		GeminiAPIKey:  getEnvOrError("GEMINI_API_KEY"),
-		TesseractPath: getEnv("TESSERACT_PATH", "tesseract"),
-		TesseractLang: getEnv("TESSERACT_LANG", "eng"),
-		TesseractDPI:  dpi,
-		OutputDir:     getEnv("OUTPUT_DIR", "test_artifacts/text"),
-		KeepTempFiles: keepFiles,
-	}
-
-	if cfg.GeminiAPIKey == "" {
-		return nil, fmt.Errorf("GEMINI_API_KEY environment variable is required")
-	}
-
-	log.Info("Configuration loaded successfully")
-	return cfg, nil
-}
-
+// getEnv is a helper to read an environment variable with a fallback.
+// Kept for infrastructure-specific settings like NATS_URL.
 func getEnv(key, fallback string) string {
 	if value, ok := os.LookupEnv(key); ok {
 		return value
 	}
 	return fallback
-}
-
-func getEnvOrError(key string) string {
-	return getEnv(key, "")
 }

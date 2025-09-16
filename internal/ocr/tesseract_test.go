@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nnikolov3/logger"
+	"github.com/book-expert/logger"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nnikolov3/png-to-text-service/internal/ocr"
+	"github.com/book-expert/png-to-text-service/internal/ocr"
 )
 
 func TestNewProcessor(t *testing.T) {

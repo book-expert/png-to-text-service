@@ -9,7 +9,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nnikolov3/configurator"
+	"github.com/book-expert/configurator"
+	"github.com/book-expert/logger"
 )
 
 // Constants for default values and permissions.
@@ -126,17 +127,24 @@ type Settings struct {
 	SkipExisting       bool `toml:"skip_existing"`
 }
 
-// Load reads, validates, and sets defaults for the configuration from a given path.
-func Load(configPath string) (*Config, error) {
-	var cfg Config
+// Load reads, validates, and sets defaults for the configuration.
+// If a configPath is provided, it sets the PROJECT_TOML env var for the configurator to
+// use.
+// Otherwise, it relies on the existing environment variable.
+func Load(configPath string, log *logger.Logger) (*Config, error) {
+	if configPath != "" {
+		if err := os.Setenv("PROJECT_TOML", configPath); err != nil {
+			return nil, fmt.Errorf(
+				"failed to set PROJECT_TOML env var for test: %w",
+				err,
+			)
+		}
+	}
 
-	err := configurator.LoadInto(configPath, &cfg)
+	var cfg Config
+	err := configurator.Load(&cfg, log)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"failed to load configuration from %s: %w",
-			configPath,
-			err,
-		)
+		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
 	err = cfg.validate()
@@ -145,21 +153,6 @@ func Load(configPath string) (*Config, error) {
 	}
 
 	return &cfg, nil
-}
-
-// FindProjectRoot searches upwards from a starting directory to find a "project.toml"
-// file, returning the project's root directory and the full path to the config file.
-func FindProjectRoot(startDir string) (rootDir, configPath string, err error) {
-	rootDir, configPath, err = configurator.FindProjectRoot(startDir)
-	if err != nil {
-		return "", "", fmt.Errorf(
-			"failed to find project root from %s: %w",
-			startDir,
-			err,
-		)
-	}
-
-	return rootDir, configPath, nil
 }
 
 // GetAPIKey retrieves the Gemini API key from the environment variable specified

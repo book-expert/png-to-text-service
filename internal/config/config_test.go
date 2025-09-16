@@ -6,10 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/book-expert/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/nnikolov3/png-to-text-service/internal/config"
+	"github.com/book-expert/png-to-text-service/internal/config"
 )
 
 // Constants for test data and configuration content.
@@ -24,6 +25,14 @@ const (
 	nonExistentPath       = "non/existent/path/project.toml"
 	defaultDirPermissions = 0o755
 )
+
+// newTestLogger creates a logger for testing purposes.
+func newTestLogger(t *testing.T) *logger.Logger {
+	t.Helper()
+	log, err := logger.New(t.TempDir(), "test.log")
+	require.NoError(t, err)
+	return log
+}
 
 // newTestConfig is a helper that returns a valid, fully-populated config struct.
 // This simplifies test setup and satisfies the exhaustruct linter.
@@ -102,6 +111,7 @@ func createTempConfigFile(t *testing.T, content string) string {
 // TestLoad_Success tests loading a valid configuration file.
 func TestLoad_Success(t *testing.T) {
 	t.Parallel()
+	log := newTestLogger(t)
 
 	validConfigContent := fmt.Sprintf(`
 [project]
@@ -115,7 +125,7 @@ enable_augmentation = true
 api_key_variable = "%s"`, testProjectName, testInputDir, testOutputDir, testAPIKeyEnvName)
 	configPath := createTempConfigFile(t, validConfigContent)
 
-	cfg, loadErr := config.Load(configPath)
+	cfg, loadErr := config.Load(configPath, log)
 
 	require.NoError(t, loadErr)
 	require.NotNil(t, cfg)
@@ -127,13 +137,14 @@ api_key_variable = "%s"`, testProjectName, testInputDir, testOutputDir, testAPIK
 // TestLoad_MissingRequiredField tests that validation catches a missing input directory.
 func TestLoad_MissingRequiredField(t *testing.T) {
 	t.Parallel()
+	log := newTestLogger(t)
 
 	missingInputDirConfigContent := fmt.Sprintf(`
 [paths]
 output_dir = "%s"`, testOutputDir)
 	configPath := createTempConfigFile(t, missingInputDirConfigContent)
 
-	cfg, loadErr := config.Load(configPath)
+	cfg, loadErr := config.Load(configPath, log)
 
 	require.Error(t, loadErr)
 	require.ErrorIs(t, loadErr, config.ErrInputDirRequired)
@@ -144,6 +155,7 @@ output_dir = "%s"`, testOutputDir)
 // without an API key variable.
 func TestLoad_MissingAPIKeyVariable(t *testing.T) {
 	t.Parallel()
+	log := newTestLogger(t)
 
 	configContent := fmt.Sprintf(`
 [paths]
@@ -155,7 +167,7 @@ enable_augmentation = true
 api_key_variable = ""`, testInputDir, testOutputDir)
 	configPath := createTempConfigFile(t, configContent)
 
-	cfg, loadErr := config.Load(configPath)
+	cfg, loadErr := config.Load(configPath, log)
 
 	require.Error(t, loadErr)
 	require.ErrorIs(t, loadErr, config.ErrAPIKeyVarRequired)
@@ -165,6 +177,7 @@ api_key_variable = ""`, testInputDir, testOutputDir)
 // TestLoad_DefaultsApplied tests that default values are set correctly.
 func TestLoad_DefaultsApplied(t *testing.T) {
 	t.Parallel()
+	log := newTestLogger(t)
 
 	configContent := fmt.Sprintf(`
 [paths]
@@ -172,7 +185,7 @@ input_dir = "%s"
 output_dir = "%s"`, testInputDir, testOutputDir)
 	configPath := createTempConfigFile(t, configContent)
 
-	cfg, loadErr := config.Load(configPath)
+	cfg, loadErr := config.Load(configPath, log)
 
 	require.NoError(t, loadErr)
 	require.NotNil(t, cfg)
@@ -184,8 +197,9 @@ output_dir = "%s"`, testInputDir, testOutputDir)
 // TestLoad_FileNotExist tests that Load returns an error for a non-existent file.
 func TestLoad_FileNotExist(t *testing.T) {
 	t.Parallel()
+	log := newTestLogger(t)
 
-	cfg, loadErr := config.Load(nonExistentPath)
+	cfg, loadErr := config.Load(nonExistentPath, log)
 	require.Error(t, loadErr)
 	assert.Nil(t, cfg)
 }
@@ -258,23 +272,4 @@ func TestGetLogFilePath(t *testing.T) {
 	actualPath := cfg.GetLogFilePath(testLogFileName)
 
 	assert.Equal(t, expectedPath, actualPath)
-}
-
-// TestFindProjectRoot_Success tests finding the project root successfully.
-func TestFindProjectRoot_Success(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	subDir := filepath.Join(tmpDir, "some", "nested", "dir")
-	require.NoError(t, os.MkdirAll(subDir, defaultDirPermissions))
-
-	configPath := filepath.Join(tmpDir, "project.toml")
-	_, createErr := os.Create(configPath)
-	require.NoError(t, createErr)
-
-	rootDir, foundPath, findErr := config.FindProjectRoot(subDir)
-
-	require.NoError(t, findErr)
-	assert.Equal(t, tmpDir, rootDir)
-	assert.Equal(t, configPath, foundPath)
 }

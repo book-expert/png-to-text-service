@@ -1,12 +1,12 @@
-module github.com/nnikolov3/png-to-text-service
+module github.com/book-expert/png-to-text-service
 
-go 1.25.0
+go 1.25.1
 
 require (
+	github.com/book-expert/configurator v0.2.4
+	github.com/book-expert/logger v0.1.3
+	github.com/book-expert/prompt-builder v0.2.1
 	github.com/nats-io/nats.go v1.45.0
-	github.com/nnikolov3/configurator v0.1.1
-	github.com/nnikolov3/logger v0.1.1
-	github.com/nnikolov3/prompt-builder v0.1.8
 	github.com/stretchr/testify v1.11.1
 )
 

@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/nnikolov3/png-to-text-service/internal/ocr"
+	"github.com/book-expert/png-to-text-service/internal/ocr"
 )
 
 func TestNewCleaner(t *testing.T) {

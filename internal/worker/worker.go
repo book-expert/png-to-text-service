@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/book-expert/logger"
 	"github.com/nats-io/nats.go"
-	"github.com/nnikolov3/logger"
 )
 
 // Pipeline defines the interface for the processing logic.
@@ -120,7 +120,9 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 			"Failed to get message metadata: %v. Acknowledging to discard.",
 			err,
 		)
-		msg.Ack()
+		if err := msg.Ack(); err != nil {
+			w.logger.Error("failed to acknowledge message: %v", err)
+		}
 
 		return
 	}
@@ -134,7 +136,13 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 			"Received empty message for object %s. Acknowledging to discard.",
 			objectID,
 		)
-		msg.Ack()
+		if err := msg.Ack(); err != nil {
+			w.logger.Error(
+				"failed to acknowledge empty message for object %s: %v",
+				objectID,
+				err,
+			)
+		}
 
 		return
 	}
@@ -145,11 +153,23 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 		// We still acknowledge the message to prevent it from being re-processed
 		// endlessly.
 		// A more advanced system might use a dead-letter queue here.
-		msg.Ack()
+		if err := msg.Ack(); err != nil {
+			w.logger.Error(
+				"failed to acknowledge failed message for object %s: %v",
+				objectID,
+				err,
+			)
+		}
 
 		return
 	}
 
 	w.logger.Success("Processed %s in %s", objectID, time.Since(startTime))
-	msg.Ack()
+	if err := msg.Ack(); err != nil {
+		w.logger.Error(
+			"failed to acknowledge successful message for object %s: %v",
+			objectID,
+			err,
+		)
+	}
 }

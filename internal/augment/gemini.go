@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nnikolov3/logger"
-	"github.com/nnikolov3/prompt-builder/promptbuilder"
+	"github.com/book-expert/logger"
+	"github.com/book-expert/prompt-builder/promptbuilder"
 )
 
 var (
@@ -366,7 +366,11 @@ func (g *GeminiProcessor) callGeminiAPI(
 	if err != nil {
 		return "", fmt.Errorf("execute request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			g.logger.Error("failed to close response body: %v", err)
+		}
+	}()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {

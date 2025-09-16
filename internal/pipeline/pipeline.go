@@ -7,15 +7,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nnikolov3/logger"
-	"github.com/nnikolov3/png-to-text-service/internal/augment"
-	"github.com/nnikolov3/png-to-text-service/internal/ocr"
+	"github.com/book-expert/logger"
+
+	"github.com/book-expert/png-to-text-service/internal/augment"
+	"github.com/book-expert/png-to-text-service/internal/ocr"
 )
 
 // Pipeline orchestrates the multi-step process of converting a PNG to augmented text.
 type Pipeline struct {
 	// REMOVED: No more storage dependency.
-	ocr              *ocr.TesseractOCR
+	ocr              *ocr.Processor
 	augmenter        *augment.GeminiProcessor
 	logger           *logger.Logger
 	localTmpDir      string
@@ -28,7 +29,7 @@ type Pipeline struct {
 // New creates a new pipeline with all its dependencies.
 func New(
 	// REMOVED: storage argument is gone.
-	ocr *ocr.TesseractOCR,
+	ocr *ocr.Processor,
 	augmenter *augment.GeminiProcessor,
 	log *logger.Logger,
 	outputDir string,
@@ -42,7 +43,11 @@ func New(
 	}
 	localTmpDir := filepath.Join(cwd, "tmp")
 	if err := os.MkdirAll(localTmpDir, 0o755); err != nil {
-		return nil, fmt.Errorf("could not create local temp directory '%s': %w", localTmpDir, err)
+		return nil, fmt.Errorf(
+			"could not create local temp directory '%s': %w",
+			localTmpDir,
+			err,
+		)
 	}
 
 	return &Pipeline{
@@ -73,19 +78,22 @@ func (p *Pipeline) Process(ctx context.Context, objectID string, pngData []byte)
 	if !p.keepTempFiles {
 		defer func() {
 			if err := os.Remove(tmpFileName); err != nil {
-				p.logger.Error("Failed to remove temporary file %s: %v", tmpFileName, err)
+				p.logger.Error(
+					"Failed to remove temporary file %s: %v",
+					tmpFileName,
+					err,
+				)
 			}
 		}()
 	}
 
 	p.logger.Info("Running OCR on temporary file: %s", tmpFileName)
 
-	ocrText, err := p.ocr.Process(ctx, tmpFileName)
+	cleanedText, err := p.ocr.ProcessPNG(ctx, tmpFileName)
 	if err != nil {
 		return fmt.Errorf("OCR processing: %w", err)
 	}
 
-	cleanedText := cleanText(ocrText)
 	if len(cleanedText) < p.minTextLength {
 		p.logger.Warn(
 			"OCR text for %s is too short (%d chars), skipping augmentation.",
@@ -119,7 +127,13 @@ func (p *Pipeline) createTempFile(data []byte) (*os.File, error) {
 	}
 
 	if _, err := tmpFile.Write(data); err != nil {
-		tmpFile.Close()
+		if closeErr := tmpFile.Close(); closeErr != nil {
+			p.logger.Error(
+				"failed to close temp file %s after write error: %v",
+				tmpFile.Name(),
+				closeErr,
+			)
+		}
 		return nil, fmt.Errorf("write to temp file: %w", err)
 	}
 
@@ -127,4 +141,8 @@ func (p *Pipeline) createTempFile(data []byte) (*os.File, error) {
 		return nil, fmt.Errorf("close temp file: %w", err)
 	}
 	return tmpFile, nil
+}
+
+func generateOutputFileName(objectID string) string {
+	return objectID + ".txt"
 }
