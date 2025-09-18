@@ -1,4 +1,4 @@
-// ./internal/ocr/cleaner.go
+// Package ocr provides functionality for Optical Character Recognition (OCR) processing and text cleaning.
 package ocr
 
 import (

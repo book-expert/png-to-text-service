@@ -1,4 +1,4 @@
-// ./internal/pipeline/pipeline.go
+// Package pipeline orchestrates the OCR and augmentation process.
 package pipeline
 
 import (
@@ -10,14 +10,30 @@ import (
 	"github.com/book-expert/logger"
 
 	"github.com/book-expert/png-to-text-service/internal/augment"
-	"github.com/book-expert/png-to-text-service/internal/ocr"
 )
+
+const (
+	defaultDirPermissions = 0o750
+)
+
+// OCRProcessor defines the interface for an OCR processor.
+type OCRProcessor interface {
+	ProcessPNG(ctx context.Context, filePath string) (string, error)
+}
+
+// Augmenter defines the interface for a text augmenter.
+type Augmenter interface {
+	AugmentTextWithOptions(
+		ctx context.Context,
+		text, imagePath string,
+		opts *augment.AugmentationOptions,
+	) (string, error)
+}
 
 // Pipeline orchestrates the multi-step process of converting a PNG to augmented text.
 type Pipeline struct {
-	// REMOVED: No more storage dependency.
-	ocr              *ocr.Processor
-	augmenter        *augment.GeminiProcessor
+	ocr              OCRProcessor
+	augmenter        Augmenter
 	logger           *logger.Logger
 	localTmpDir      string
 	keepTempFiles    bool
@@ -27,9 +43,8 @@ type Pipeline struct {
 
 // New creates a new pipeline with all its dependencies.
 func New(
-	// REMOVED: storage argument is gone.
-	ocr *ocr.Processor,
-	augmenter *augment.GeminiProcessor,
+	ocr OCRProcessor,
+	augmenter Augmenter,
 	log *logger.Logger,
 	keepTempFiles bool,
 	minTextLength int,
@@ -39,8 +54,11 @@ func New(
 	if err != nil {
 		return nil, fmt.Errorf("could not get current working directory: %w", err)
 	}
+
 	localTmpDir := filepath.Join(cwd, "tmp")
-	if err := os.MkdirAll(localTmpDir, 0o755); err != nil {
+
+	err = os.MkdirAll(localTmpDir, defaultDirPermissions)
+	if err != nil {
 		return nil, fmt.Errorf(
 			"could not create local temp directory '%s': %w",
 			localTmpDir,
@@ -74,11 +92,13 @@ func (p *Pipeline) Process(
 	if err != nil {
 		return "", fmt.Errorf("create temp file for '%s': %w", objectID, err)
 	}
+
 	tmpFileName := tmpFile.Name()
 
 	if !p.keepTempFiles {
 		defer func() {
-			if err := os.Remove(tmpFileName); err != nil {
+			err := os.Remove(tmpFileName)
+			if err != nil {
 				p.logger.Error(
 					"Failed to remove temporary file %s: %v",
 					tmpFileName,
@@ -103,6 +123,7 @@ func (p *Pipeline) Process(
 		)
 	} else {
 		p.logger.Info("Augmenting text for %s", objectID)
+
 		augmentedText, err := p.augmenter.AugmentTextWithOptions(ctx, cleanedText, tmpFileName, p.augmentationOpts)
 		if err != nil {
 			p.logger.Warn("Text augmentation failed for %s: %v. Using cleaned OCR text as fallback.", objectID, err)
@@ -112,6 +133,7 @@ func (p *Pipeline) Process(
 	}
 
 	p.logger.Info("Successfully processed object %s", objectID)
+
 	return cleanedText, nil
 }
 
@@ -121,19 +143,24 @@ func (p *Pipeline) createTempFile(data []byte) (*os.File, error) {
 		return nil, fmt.Errorf("create temp file: %w", err)
 	}
 
-	if _, err := tmpFile.Write(data); err != nil {
-		if closeErr := tmpFile.Close(); closeErr != nil {
+	_, err = tmpFile.Write(data)
+	if err != nil {
+		closeErr := tmpFile.Close()
+		if closeErr != nil {
 			p.logger.Error(
 				"failed to close temp file %s after write error: %v",
 				tmpFile.Name(),
 				closeErr,
 			)
 		}
+
 		return nil, fmt.Errorf("write to temp file: %w", err)
 	}
 
-	if err := tmpFile.Close(); err != nil {
-		return nil, fmt.Errorf("close temp file: %w", err)
+	closeErr := tmpFile.Close()
+	if closeErr != nil {
+		return nil, fmt.Errorf("close temp file: %w", closeErr)
 	}
+
 	return tmpFile, nil
 }

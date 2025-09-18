@@ -144,7 +144,8 @@ type Gemini struct {
 // Otherwise, it relies on the existing environment variable.
 func Load(configPath string, log *logger.Logger) (*Config, error) {
 	if configPath != "" {
-		if err := os.Setenv("PROJECT_TOML", configPath); err != nil {
+		err := os.Setenv("PROJECT_TOML", configPath)
+		if err != nil {
 			return nil, fmt.Errorf(
 				"failed to set PROJECT_TOML env var for test: %w",
 				err,
@@ -153,6 +154,7 @@ func Load(configPath string, log *logger.Logger) (*Config, error) {
 	}
 
 	var cfg Config
+
 	err := configurator.Load(&cfg, log)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load configuration: %w", err)
@@ -172,6 +174,7 @@ func (c *Config) GetAPIKey() string {
 	if c.PNGToTextService.Gemini.APIKeyVariable == "" {
 		return ""
 	}
+
 	return os.Getenv(c.PNGToTextService.Gemini.APIKeyVariable)
 }
 
@@ -181,10 +184,12 @@ func (c *Config) EnsureDirectories() error {
 	if logDir == "" {
 		logDir = c.Paths.BaseLogsDir
 	}
+
 	err := os.MkdirAll(logDir, defaultDirPermission)
 	if err != nil {
 		return fmt.Errorf("failed to create log directory %s: %w", logDir, err)
 	}
+
 	return nil
 }
 
@@ -194,12 +199,19 @@ func (c *Config) GetLogFilePath(filename string) string {
 	if logDir == "" {
 		logDir = c.Paths.BaseLogsDir
 	}
+
 	return filepath.Join(logDir, filename)
 }
 
 // validate runs all validation and default-setting routines for the configuration.
 func (c *Config) validate() error {
 	c.applyDefaults()
+
+	if c.PNGToTextService.Augmentation.UsePromptBuilder &&
+		c.PNGToTextService.Gemini.APIKeyVariable == "" {
+		return ErrAPIKeyVarRequired
+	}
+
 	return nil
 }
 
@@ -220,6 +232,7 @@ func (c *Config) applyDefaults() {
 
 	// Logging defaults
 	setStringDefault(&c.PNGToTextService.Logging.Level, "info")
+
 	if c.PNGToTextService.Logging.Dir == "" {
 		c.PNGToTextService.Logging.Dir = c.Paths.BaseLogsDir
 	}
@@ -228,6 +241,7 @@ func (c *Config) applyDefaults() {
 	if len(c.PNGToTextService.Gemini.Models) == 0 {
 		c.PNGToTextService.Gemini.Models = []string{"gemini-1.5-flash"}
 	}
+
 	setIntDefault(&c.PNGToTextService.Gemini.MaxRetries, defaultGeminiMaxRetries)
 	setIntDefault(
 		&c.PNGToTextService.Gemini.RetryDelaySeconds,

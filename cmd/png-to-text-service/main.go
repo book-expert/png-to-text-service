@@ -18,6 +18,13 @@ import (
 	"github.com/book-expert/png-to-text-service/internal/worker"
 )
 
+const (
+	// MinTextLength defines the minimum length of text required for processing.
+	MinTextLength = 10
+	// ShutdownGracePeriodSeconds defines the duration to wait for graceful shutdown.
+	ShutdownGracePeriodSeconds = 2
+)
+
 func main() {
 	// A temporary logger for the bootstrap process
 	log, err := logger.New(os.TempDir(), "png-to-text-bootstrap.log")
@@ -41,6 +48,7 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -62,8 +70,10 @@ func main() {
 			cfg.PNGToTextService.Gemini.APIKeyVariable,
 		)
 	}
+
 	geminiCfg := &augment.GeminiConfig{
 		APIKey:            geminiAPIKey,
+		PromptTemplate:    "", // Added missing field
 		Models:            cfg.PNGToTextService.Gemini.Models,
 		Temperature:       cfg.PNGToTextService.Gemini.Temperature,
 		TimeoutSeconds:    cfg.PNGToTextService.Gemini.TimeoutSeconds,
@@ -80,9 +90,10 @@ func main() {
 		ocrProcessor,
 		geminiProcessor,
 		log,
-		false, // keepTempFiles is a debug-only setting.
-		10,    // minTextLength
+		false,         // keepTempFiles is a debug-only setting.
+		MinTextLength, // minTextLength
 		&augment.AugmentationOptions{
+			Parameters: nil, // Added missing field
 			Type: augment.AugmentationType(
 				cfg.PNGToTextService.Augmentation.Type,
 			),
@@ -110,7 +121,9 @@ func main() {
 
 	go func() {
 		log.Info("Starting NATS worker...")
-		if err := natsWorker.Run(ctx); err != nil {
+
+		err := natsWorker.Run(ctx)
+		if err != nil {
 			log.Error("NATS worker stopped with error: %v", err)
 			cancel()
 		}
@@ -119,6 +132,6 @@ func main() {
 	<-sigChan
 	log.Info("Shutdown signal received, gracefully shutting down...")
 	cancel()
-	time.Sleep(2 * time.Second)
+	time.Sleep(ShutdownGracePeriodSeconds * time.Second)
 	log.Info("Shutdown complete.")
 }

@@ -17,8 +17,6 @@ import (
 
 // Constants for test data and configuration content.
 const (
-	testAPIKeyEnvName     = "GEMINI_API_KEY"
-	testAPIKeySecretValue = "test-key-12345"
 	testProjectName       = "test-service"
 	testLogsDirName       = "logs"
 	testLogFileName       = "app.log"
@@ -30,6 +28,7 @@ func newTestLogger(t *testing.T) *logger.Logger {
 	t.Helper()
 	log, err := logger.New(t.TempDir(), "test.log")
 	require.NoError(t, err)
+
 	return log
 }
 
@@ -38,6 +37,7 @@ func newTestConfig(t *testing.T) *config.Config {
 	t.Helper()
 
 	tmpDir := t.TempDir()
+	apiKeyEnvName := "GEMINI_API_KEY"
 
 	return &config.Config{
 		Project: config.Project{
@@ -59,7 +59,7 @@ func newTestConfig(t *testing.T) *config.Config {
 				EnableConsoleLogging: true,
 			},
 			Gemini: config.Gemini{
-				APIKeyVariable:    testAPIKeyEnvName,
+				APIKeyVariable:    apiKeyEnvName,
 				Models:            []string{"gemini-pro"},
 				MaxRetries:        3,
 				RetryDelaySeconds: 5,
@@ -85,6 +85,25 @@ func newTestConfig(t *testing.T) *config.Config {
 				TimeoutSeconds: 60,
 			},
 		},
+		NATS: config.NATSConfig{
+			URL:                      "nats://127.0.0.1:4222",
+			PDFStreamName:            "PDF_JOBS",
+			PDFConsumerName:          "pdf-workers",
+			PDFCreatedSubject:        "pdf.created",
+			PDFObjectStoreBucket:     "PDF_FILES",
+			PNGStreamName:            "PNG_PROCESSING",
+			PNGConsumerName:          "png-text-workers",
+			PNGCreatedSubject:        "png.created",
+			PNGObjectStoreBucket:     "PNG_FILES",
+			TextObjectStoreBucket:    "TEXT_FILES",
+			TTSStreamName:            "TTS_JOBS",
+			TTSConsumerName:          "tts-workers",
+			TextProcessedSubject:     "text.processed",
+			AudioChunkCreatedSubject: "audio.chunk.created",
+			AudioObjectStoreBucket:   "AUDIO_FILES",
+			TextStreamName:           "TTS_JOBS",
+			DeadLetterSubject:        "",
+		},
 	}
 }
 
@@ -92,14 +111,16 @@ func newTestConfig(t *testing.T) *config.Config {
 func TestLoad_Success(t *testing.T) {
 	log := newTestLogger(t)
 
+	apiKeyEnvName := "GEMINI_API_KEY"
 	validConfigContent := fmt.Sprintf(`
 [project]
 name = "%s"
 [png_to_text_service.gemini]
-api_key_variable = "%s"`, testProjectName, testAPIKeyEnvName)
+api_key_variable = "%s"`, testProjectName, apiKeyEnvName)
 	configPath := createTempConfigFile(t, validConfigContent)
 
-	_, url := startTestServer(t, configPath)
+	url, cleanup := startTestServer(t, configPath)
+	t.Cleanup(cleanup)
 	t.Setenv("PROJECT_TOML", url)
 
 	cfg, loadErr := config.Load("", log)
@@ -107,7 +128,7 @@ api_key_variable = "%s"`, testProjectName, testAPIKeyEnvName)
 	require.NoError(t, loadErr)
 	require.NotNil(t, cfg)
 	assert.Equal(t, testProjectName, cfg.Project.Name)
-	assert.Equal(t, testAPIKeyEnvName, cfg.PNGToTextService.Gemini.APIKeyVariable)
+	assert.Equal(t, apiKeyEnvName, cfg.PNGToTextService.Gemini.APIKeyVariable)
 }
 
 // TestLoad_DefaultsApplied tests that default values are set correctly.
@@ -119,7 +140,8 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 name = "test"`
 	configPath := createTempConfigFile(t, configContent)
 
-	_, url := startTestServer(t, configPath)
+	url, cleanup := startTestServer(t, configPath)
+	t.Cleanup(cleanup)
 	t.Setenv("PROJECT_TOML", url)
 
 	cfg, loadErr := config.Load("", log)
@@ -174,18 +196,21 @@ func TestLoad_Server404(t *testing.T) {
 
 // TestGetAPIKey_Success verifies API key retrieval from the environment.
 func TestGetAPIKey_Success(t *testing.T) {
-	t.Setenv(testAPIKeyEnvName, testAPIKeySecretValue)
+	apiKeyEnvName := "GEMINI_API_KEY"
+	apiKeySecretValue := "test-key-12345"
+	t.Setenv(apiKeyEnvName, apiKeySecretValue)
 
 	cfg := newTestConfig(t)
 
 	apiKey := cfg.GetAPIKey()
 
-	assert.Equal(t, testAPIKeySecretValue, apiKey)
+	assert.Equal(t, apiKeySecretValue, apiKey)
 }
 
 // TestGetAPIKey_NotSet verifies an empty string is returned if the env var is not set.
 func TestGetAPIKey_NotSet(t *testing.T) {
-	t.Setenv(testAPIKeyEnvName, "")
+	apiKeyEnvName := "GEMINI_API_KEY"
+	t.Setenv(apiKeyEnvName, "")
 
 	cfg := newTestConfig(t)
 
@@ -196,6 +221,7 @@ func TestGetAPIKey_NotSet(t *testing.T) {
 
 // TestEnsureDirectories_CreatesAll checks that required directories are created.
 func TestEnsureDirectories_CreatesAll(t *testing.T) {
+	t.Parallel()
 	cfg := newTestConfig(t)
 
 	// Override log dir to test creation
@@ -212,6 +238,7 @@ func TestEnsureDirectories_CreatesAll(t *testing.T) {
 
 // TestGetLogFilePath tests the construction of a log file path.
 func TestGetLogFilePath(t *testing.T) {
+	t.Parallel()
 	cfg := newTestConfig(t)
 	expectedPath := filepath.Join(cfg.PNGToTextService.Logging.Dir, testLogFileName)
 
@@ -238,7 +265,7 @@ func createTempConfigFile(t *testing.T, content string) string {
 
 // startTestServer starts a local HTTP server to serve a given file path.
 // It returns the server instance and the URL where the file is served.
-func startTestServer(t *testing.T, filePath string) (*httptest.Server, string) {
+func startTestServer(t *testing.T, filePath string) (string, func()) {
 	t.Helper()
 
 	server := httptest.NewServer(
@@ -249,7 +276,5 @@ func startTestServer(t *testing.T, filePath string) (*httptest.Server, string) {
 
 	url := fmt.Sprintf("%s/%s", server.URL, filepath.Base(filePath))
 
-	t.Cleanup(server.Close)
-
-	return server, url
+	return url, server.Close
 }

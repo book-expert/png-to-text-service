@@ -1,4 +1,4 @@
-// ./internal/augment/gemini.go
+// Package augment provides functionality for augmenting OCR text using the Gemini API.
 package augment
 
 import (
@@ -20,26 +20,39 @@ import (
 )
 
 var (
+	// ErrImagePathRequired is returned when the image path is empty.
 	ErrImagePathRequired = errors.New("image path is required")
-	ErrEmptyResponse     = errors.New("empty response")
-	ErrNoCandidates      = errors.New("no candidates in response")
-	ErrGeminiAPIError    = errors.New("gemini API error")
-	ErrMaxRetries        = errors.New("max retries exceeded")
+	// ErrEmptyResponse is returned when the Gemini API returns an empty response.
+	ErrEmptyResponse = errors.New("empty response")
+	// ErrNoCandidates is returned when the Gemini API response contains no candidates.
+	ErrNoCandidates = errors.New("no candidates in response")
+	// ErrGeminiAPIError is returned when the Gemini API returns an error.
+	ErrGeminiAPIError = errors.New("gemini API error")
+	// ErrMaxRetries is returned when the maximum number of retries is exceeded.
+	ErrMaxRetries = errors.New("max retries exceeded")
 )
 
+// AugmentationType defines the type of augmentation to perform.
 type AugmentationType string
 
 const (
+	// AugmentationCommentary indicates that the augmentation should be a commentary.
 	AugmentationCommentary AugmentationType = "commentary"
-	AugmentationSummary    AugmentationType = "summary"
+	// AugmentationSummary indicates that the augmentation should be a summary.
+	AugmentationSummary AugmentationType = "summary"
+
+	// MaxFileSize1MB defines the maximum file size allowed for processing in bytes (1MB).
+	MaxFileSize1MB = 1024 * 1024
 )
 
+// AugmentationOptions holds options for text augmentation.
 type AugmentationOptions struct {
 	Parameters   map[string]any   `json:"parameters"`
 	Type         AugmentationType `json:"mode"`
 	CustomPrompt string           `json:"customPrompt"`
 }
 
+// GeminiConfig holds the configuration for the Gemini API client.
 type GeminiConfig struct {
 	APIKey            string
 	PromptTemplate    string // No longer used by the new builder, but kept for the simple path
@@ -54,6 +67,7 @@ type GeminiConfig struct {
 	UsePromptBuilder  bool
 }
 
+// GeminiProcessor provides methods for interacting with the Gemini API.
 type GeminiProcessor struct {
 	httpClient *http.Client
 	logger     *logger.Logger
@@ -108,22 +122,29 @@ type geminiResponse struct {
 	Candidates []geminiCandidate `json:"candidates"`
 }
 
+// NewGeminiProcessor creates a new GeminiProcessor instance.
 func NewGeminiProcessor(config *GeminiConfig, log *logger.Logger) *GeminiProcessor {
 	return &GeminiProcessor{
 		config: *config,
 		httpClient: &http.Client{
-			Timeout: time.Duration(config.TimeoutSeconds) * time.Second,
+			Timeout:       time.Duration(config.TimeoutSeconds) * time.Second,
+			Transport:     nil, // Added missing field
+			CheckRedirect: nil, // Added missing field
+			Jar:           nil, // Added missing field
 		},
 		logger: log,
 	}
 }
 
+// AugmentTextWithOptions augments the given OCR text with additional information
+// using the Gemini API, based on the provided image and augmentation options.
 func (g *GeminiProcessor) AugmentTextWithOptions(
 	ctx context.Context,
 	ocrText, imagePath string,
 	opts *AugmentationOptions,
 ) (string, error) {
-	if err := g.validateInputs(ocrText, imagePath); err != nil {
+	err := g.validateInputs(ocrText, imagePath)
+	if err != nil {
 		return "", fmt.Errorf("validate inputs: %w", err)
 	}
 
@@ -168,7 +189,7 @@ func (g *GeminiProcessor) buildPromptWithBuilder(
 		".png",
 	}
 	fileProcessor := promptbuilder.NewFileProcessor(
-		1024*1024,
+		MaxFileSize1MB,
 		allowedExtensions,
 	) // 1MB max file size
 
@@ -183,8 +204,13 @@ func (g *GeminiProcessor) buildPromptWithBuilder(
 
 	// 3. Create a BuildRequest struct with all the necessary information.
 	req := &promptbuilder.BuildRequest{
-		Prompt: ocrText,   // The main text goes into the prompt field.
-		File:   imagePath, // The image path is treated as the file to be included.
+		Prompt:        ocrText,   // The main text goes into the prompt field.
+		File:          imagePath, // The image path is treated as the file to be included.
+		Task:          "",        // Added missing field
+		SystemMessage: "",        // Added missing field
+		Guidelines:    "",        // Added missing field
+		Image:         "",        // Added missing field
+		OutputFormat:  "",        // Added missing field
 	}
 
 	if opts != nil {
@@ -231,7 +257,9 @@ func (g *GeminiProcessor) prepareImageData(
 func (g *GeminiProcessor) readAndEncodeImage(
 	imagePath string,
 ) (encodedData, mimeType string, err error) {
-	imageBytes, err := os.ReadFile(imagePath)
+	cleanedImagePath := filepath.Clean(imagePath)
+
+	imageBytes, err := os.ReadFile(cleanedImagePath)
 	if err != nil {
 		return "", "", fmt.Errorf("read image file: %w", err)
 	}
@@ -298,7 +326,7 @@ func (g *GeminiProcessor) tryModelWithRetries(
 		if attempt < g.config.MaxRetries {
 			select {
 			case <-ctx.Done():
-				return "", ctx.Err()
+				return "", fmt.Errorf("context done: %w", ctx.Err())
 			case <-time.After(time.Duration(g.config.RetryDelaySeconds) * time.Second):
 				// continue
 			}
@@ -327,12 +355,13 @@ func (g *GeminiProcessor) callGeminiAPI(
 			{
 				Role: "user",
 				Parts: []geminiPart{
-					{Text: prompt},
+					{Text: prompt, InlineData: nil}, // Added missing field
 					{
 						InlineData: &geminiInlineData{
 							MimeType: mimeType,
 							Data:     imageData,
 						},
+						Text: "", // Added missing field
 					},
 				},
 			},
@@ -366,8 +395,10 @@ func (g *GeminiProcessor) callGeminiAPI(
 	if err != nil {
 		return "", fmt.Errorf("execute request: %w", err)
 	}
+
 	defer func() {
-		if err := resp.Body.Close(); err != nil {
+		err := resp.Body.Close()
+		if err != nil {
 			g.logger.Error("failed to close response body: %v", err)
 		}
 	}()
@@ -378,16 +409,18 @@ func (g *GeminiProcessor) callGeminiAPI(
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf(
-			"HTTP %d: %s",
+		return "", fmt.Errorf("%w: HTTP %d: %s",
+			ErrGeminiAPIError,
 			resp.StatusCode,
 			strings.TrimSpace(string(respBytes)),
 		)
 	}
 
 	var geminiResp geminiResponse
-	if err := json.Unmarshal(respBytes, &geminiResp); err != nil {
-		return "", fmt.Errorf("unmarshal response: %w", err)
+
+	unmarshalErr := json.Unmarshal(respBytes, &geminiResp)
+	if unmarshalErr != nil {
+		return "", fmt.Errorf("unmarshal response: %w", unmarshalErr)
 	}
 
 	if len(geminiResp.Candidates) == 0 ||

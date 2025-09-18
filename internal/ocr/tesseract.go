@@ -151,8 +151,10 @@ func (p *Processor) runTesseract(ctx context.Context, pngPath string) (string, e
 	tesseractCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	cleanedPngPath := filepath.Clean(pngPath)
+
 	args := []string{
-		pngPath,
+		cleanedPngPath,
 		"stdout",
 		"-l", p.config.Language,
 		"--dpi", strconv.Itoa(p.config.DPI),
@@ -204,8 +206,10 @@ func (p *Processor) retryTesseract(ctx context.Context, pngPath string) (string,
 	retryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	cleanedPngPath := filepath.Clean(pngPath)
+
 	args := []string{
-		pngPath,
+		cleanedPngPath,
 		"stdout",
 		"-l", p.config.Language,
 		"--dpi", strconv.Itoa(p.config.DPI),
