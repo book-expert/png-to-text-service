@@ -103,9 +103,10 @@ type Prompts struct {
 
 // Augmentation defines settings for AI text augmentation.
 type Augmentation struct {
-	Type             string `toml:"type"`
-	CustomPrompt     string `toml:"custom_prompt"`
-	UsePromptBuilder bool   `toml:"use_prompt_builder"`
+	Type             string         `toml:"type"`
+	CustomPrompt     string         `toml:"custom_prompt"`
+	UsePromptBuilder bool           `toml:"use_prompt_builder"`
+	Parameters       map[string]any `toml:"parameters"`
 }
 
 // Logging defines the configuration for logging.

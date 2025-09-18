@@ -66,7 +66,7 @@ func initGeminiProcessor(cfg *config.Config, log *logger.Logger) *augment.Gemini
 
 	geminiCfg := &augment.GeminiConfig{
 		APIKey:            geminiAPIKey,
-		PromptTemplate:    "", // Added missing field
+		PromptTemplate:    cfg.PNGToTextService.Prompts.Augmentation,
 		Models:            cfg.PNGToTextService.Gemini.Models,
 		Temperature:       cfg.PNGToTextService.Gemini.Temperature,
 		TimeoutSeconds:    cfg.PNGToTextService.Gemini.TimeoutSeconds,
@@ -94,7 +94,7 @@ func initPipeline(
 		false,         // keepTempFiles is a debug-only setting.
 		MinTextLength, // minTextLength
 		&augment.AugmentationOptions{
-			Parameters: nil, // Added missing field
+			Parameters: cfg.PNGToTextService.Augmentation.Parameters,
 			Type: augment.AugmentationType(
 				cfg.PNGToTextService.Augmentation.Type,
 			),

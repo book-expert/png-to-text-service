@@ -93,6 +93,7 @@ func newTestPNGToTextServiceConfig(t *testing.T, tmpDir, apiKeyEnvName string) c
 			Type:             "commentary",
 			CustomPrompt:     "",
 			UsePromptBuilder: true,
+			Parameters:       map[string]any{},
 		},
 		Tesseract: config.Tesseract{
 			Language:       "eng",

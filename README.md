@@ -11,11 +11,11 @@ The core workflow consists of three main stages:
 2.  **Augment (Optional)**: If enabled, the extracted text and the source image are sent to a multimodal AI model (e.g., Google Gemini) to generate additional context, such as a summary or commentary.
 3.  **Output**: The final text, either the cleaned OCR output or the AI-augmented version, is saved to a file.
 
-The service is configured via a `project.toml` file and is designed to be run as a worker processing jobs from a NATS message queue.
+The service is configured via a `project.toml` file, which can be loaded from a local path or a URL, and is designed to be run as a worker processing jobs from a NATS message queue.
 
 ## Technology Stack
 
-*   **Language:** Go (1.25+)
+*   **Language:** Go (1.23+)
 *   **OCR Engine:** Tesseract
 *   **AI Integration:** Google Gemini (pluggable for other providers)
 *   **Messaging:** NATS
@@ -24,7 +24,7 @@ The service is configured via a `project.toml` file and is designed to be run as
 
 ### Prerequisites
 
-- **Go**: Version 1.25 or later must be installed.
+- **Go**: Version 1.23 or later must be installed.
   ```bash
   # Example for Ubuntu/Debian
   sudo apt-get update && sudo apt-get install golang
@@ -34,9 +34,20 @@ The service is configured via a `project.toml` file and is designed to be run as
   # Example for Ubuntu/Debian
   sudo apt-get update && sudo apt-get install tesseract-ocr
   ```
-- **AI Provider API Key**: If using AI augmentation, an API key from your provider is required. This should be set as an environment variable.
+- **Make**: The `make` utility is required to build and test the project.
+  ```bash
+  # Example for Ubuntu/Debian
+  sudo apt-get update && sudo apt-get install make
+  ```
+- **AI Provider API Key**: If using AI augmentation, an API key from your provider is required. This should be set as an environment variable (e.g., `GEMINI_API_KEY`).
   ```bash
   export GEMINI_API_KEY="your-api-key-here"
+  ```
+- **Configuration File**: A `project.toml` file is required for configuration. The path to this file (local or URL) must be set in the `PROJECT_TOML` environment variable.
+  ```bash
+  export PROJECT_TOML="/path/to/your/project.toml"
+  # Or from a URL
+  export PROJECT_TOML="https://example.com/project.toml"
   ```
 
 ### Installation
