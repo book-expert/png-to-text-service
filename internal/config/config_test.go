@@ -15,6 +15,10 @@ import (
 	"github.com/book-expert/png-to-text-service/internal/config"
 )
 
+const (
+	geminiAPIKeyEnvName = "GEMINI_API_KEY"
+)
+
 // Constants for test data and configuration content.
 const (
 	testProjectName       = "test-service"
@@ -37,7 +41,7 @@ func newTestConfig(t *testing.T) *config.Config {
 	t.Helper()
 
 	tmpDir := t.TempDir()
-	apiKeyEnvName := "GEMINI_API_KEY"
+	apiKeyEnvName := geminiAPIKeyEnvName
 
 	return &config.Config{
 		Project: config.Project{
@@ -111,7 +115,7 @@ func newTestConfig(t *testing.T) *config.Config {
 func TestLoad_Success(t *testing.T) {
 	log := newTestLogger(t)
 
-	apiKeyEnvName := "GEMINI_API_KEY"
+	apiKeyEnvName := geminiAPIKeyEnvName
 	validConfigContent := fmt.Sprintf(`
 [project]
 name = "%s"
@@ -196,7 +200,7 @@ func TestLoad_Server404(t *testing.T) {
 
 // TestGetAPIKey_Success verifies API key retrieval from the environment.
 func TestGetAPIKey_Success(t *testing.T) {
-	apiKeyEnvName := "GEMINI_API_KEY"
+	apiKeyEnvName := geminiAPIKeyEnvName
 	apiKeySecretValue := "test-key-12345"
 	t.Setenv(apiKeyEnvName, apiKeySecretValue)
 
@@ -209,7 +213,7 @@ func TestGetAPIKey_Success(t *testing.T) {
 
 // TestGetAPIKey_NotSet verifies an empty string is returned if the env var is not set.
 func TestGetAPIKey_NotSet(t *testing.T) {
-	apiKeyEnvName := "GEMINI_API_KEY"
+	apiKeyEnvName := geminiAPIKeyEnvName
 	t.Setenv(apiKeyEnvName, "")
 
 	cfg := newTestConfig(t)
