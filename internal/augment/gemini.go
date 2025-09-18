@@ -341,27 +341,21 @@ func (g *GeminiProcessor) tryModelWithRetries(
 	)
 }
 
-func (g *GeminiProcessor) callGeminiAPI(
-	ctx context.Context,
-	model, prompt, imageData, mimeType string,
-) (string, error) {
-	url := fmt.Sprintf(
-		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
-		model,
-		g.config.APIKey,
-	)
+func (g *GeminiProcessor) createGeminiRequest(
+	prompt, imageData, mimeType string,
+) ([]byte, error) {
 	reqBody := geminiRequest{
 		Contents: []geminiContent{
 			{
 				Role: "user",
 				Parts: []geminiPart{
-					{Text: prompt, InlineData: nil}, // Added missing field
+					{Text: prompt, InlineData: nil},
 					{
 						InlineData: &geminiInlineData{
 							MimeType: mimeType,
 							Data:     imageData,
 						},
-						Text: "", // Added missing field
+						Text: "",
 					},
 				},
 			},
@@ -376,9 +370,17 @@ func (g *GeminiProcessor) callGeminiAPI(
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("marshal request: %w", err)
+		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	return jsonData, nil
+}
+
+func (g *GeminiProcessor) executeHTTPRequest(
+	ctx context.Context,
+	url string,
+	jsonData []byte,
+) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodPost,
@@ -386,16 +388,22 @@ func (g *GeminiProcessor) callGeminiAPI(
 		bytes.NewReader(jsonData),
 	)
 	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := g.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("execute request: %w", err)
+		return nil, fmt.Errorf("execute request: %w", err)
 	}
 
+	return resp, nil
+}
+
+func (g *GeminiProcessor) processGeminiResponse(
+	resp *http.Response,
+) (string, error) {
 	defer func() {
 		err := resp.Body.Close()
 		if err != nil {
@@ -434,4 +442,27 @@ func (g *GeminiProcessor) callGeminiAPI(
 	}
 
 	return textBuilder.String(), nil
+}
+
+func (g *GeminiProcessor) callGeminiAPI(
+	ctx context.Context,
+	model, prompt, imageData, mimeType string,
+) (string, error) {
+	url := fmt.Sprintf(
+		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
+		model,
+		g.config.APIKey,
+	)
+
+	jsonData, err := g.createGeminiRequest(prompt, imageData, mimeType)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := g.executeHTTPRequest(ctx, url, jsonData)
+	if err != nil {
+		return "", err
+	}
+
+	return g.processGeminiResponse(resp)
 }

@@ -142,25 +142,25 @@ func runWorker(ctx context.Context, natsWorker *worker.NatsWorker, log *logger.L
 	}()
 }
 
-func main() {
+func run() error {
 	// A temporary logger for the bootstrap process
 	bootstrapLog, err := setupLogger(os.TempDir())
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create bootstrap logger: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create bootstrap logger: %w", err)
 	}
 
 	// Load configuration using the central configurator
 	cfg, err := loadConfig(bootstrapLog)
 	if err != nil {
-		bootstrapLog.Fatal("Failed to load configuration: %v", err)
+		bootstrapLog.Error("Failed to load configuration: %v", err)
+
+		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
 	// Initialize the final logger based on the loaded configuration
 	log, err := setupLogger(cfg.Paths.BaseLogsDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create final logger: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create final logger: %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -177,20 +177,33 @@ func main() {
 
 	mainPipeline, err := initPipeline(ocrProcessor, geminiProcessor, cfg, log)
 	if err != nil {
-		log.Fatal("Failed to initialize processing pipeline: %v", err)
+		log.Error("Failed to initialize processing pipeline: %v", err)
+
+		return fmt.Errorf("failed to initialize processing pipeline: %w", err)
 	}
 
 	// Initialize the NATS worker from configuration
 	natsWorker, err := initNATSWorker(cfg, mainPipeline, log)
 	if err != nil {
-		log.Fatal("Failed to initialize NATS worker: %v", err)
+		log.Error("Failed to initialize NATS worker: %v", err)
+
+		return fmt.Errorf("failed to initialize NATS worker: %w", err)
 	}
 
 	runWorker(ctx, natsWorker, log)
 
 	<-sigChan
 	log.Info("Shutdown signal received, gracefully shutting down...")
-	cancel()
 	time.Sleep(ShutdownGracePeriodSeconds * time.Second)
 	log.Info("Shutdown complete.")
+
+	return nil
+}
+
+func main() {
+	err := run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Service exited with error: %v\n", err)
+		os.Exit(1)
+	}
 }
