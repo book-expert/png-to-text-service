@@ -404,13 +404,6 @@ func (g *GeminiProcessor) executeHTTPRequest(
 func (g *GeminiProcessor) processGeminiResponse(
 	resp *http.Response,
 ) (string, error) {
-	defer func() {
-		err := resp.Body.Close()
-		if err != nil {
-			g.logger.Error("failed to close response body: %v", err)
-		}
-	}()
-
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("read response: %w", err)
@@ -463,6 +456,13 @@ func (g *GeminiProcessor) callGeminiAPI(
 	if err != nil {
 		return "", err
 	}
+
+	defer func() {
+		closeErr := resp.Body.Close()
+		if closeErr != nil {
+			g.logger.Error("failed to close response body: %v", closeErr)
+		}
+	}()
 
 	return g.processGeminiResponse(resp)
 }

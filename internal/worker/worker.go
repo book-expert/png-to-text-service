@@ -126,86 +126,32 @@ func (w *NatsWorker) Run(ctx context.Context) error {
 func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 	startTime := time.Now()
 
-	meta, err := msg.Metadata()
-	if err != nil {
-		w.logger.Error(
-			"Failed to get message metadata: %v. Acknowledging to discard.",
-			err,
-		)
-
-		err := msg.Ack()
-		if err != nil {
-			w.logger.Error("failed to acknowledge message: %v", err)
-		}
+	meta, metaErr := msg.Metadata()
+	if metaErr != nil {
+		w.handleMessageMetadataError(msg, metaErr)
 
 		return
 	}
 
 	objectID := "seq-" + strconv.FormatUint(meta.Sequence.Stream, 10)
-
 	pngData := msg.Data
+
 	if len(pngData) == 0 {
-		w.logger.Warn(
-			"Received empty message for object %s. Acknowledging to discard.",
-			objectID,
-		)
-
-		err := msg.Ack()
-		if err != nil {
-			w.logger.Error(
-				"failed to acknowledge empty message for object %s: %v",
-				objectID,
-				err,
-			)
-		}
+		w.handleEmptyMessage(msg, objectID)
 
 		return
 	}
 
-	processedText, err := w.pipeline.Process(ctx, objectID, pngData)
-	if err != nil {
-		w.logger.Error("Pipeline failed for '%s': %v", objectID, err)
-		// Publish to dead-letter subject
-		_, pubErr := w.jetstream.Publish(w.deadLetterSubject, msg.Data)
-		if pubErr != nil {
-			w.logger.Error(
-				"Failed to publish message to dead-letter subject for object %s: %v",
-				objectID,
-				pubErr,
-			)
-		}
-
-		ackErr := msg.Ack()
-		if ackErr != nil {
-			w.logger.Error(
-				"failed to acknowledge failed message for object %s: %v",
-				objectID,
-				ackErr,
-			)
-		}
+	processedText, pipelineErr := w.pipeline.Process(ctx, objectID, pngData)
+	if pipelineErr != nil {
+		w.handleMessagePipelineError(msg, objectID, pipelineErr)
 
 		return
 	}
 
-	// Publish the processed text to the output subject.
 	_, publishErr := w.jetstream.Publish(w.outputSubject, []byte(processedText))
 	if publishErr != nil {
-		w.logger.Error(
-			"Failed to publish processed text for object %s: %v",
-			objectID,
-			publishErr,
-		)
-		// We still acknowledge the message to prevent it from being re-processed
-		// endlessly.
-		// A more advanced system might use a dead-letter queue here.
-		err := msg.Ack()
-		if err != nil {
-			w.logger.Error(
-				"failed to acknowledge failed message for object %s: %v",
-				objectID,
-				err,
-			)
-		}
+		w.handleMessagePublishError(msg, objectID, publishErr)
 
 		return
 	}
@@ -219,5 +165,65 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 			objectID,
 			ackErr,
 		)
+	}
+}
+
+func (w *NatsWorker) handleMessageMetadataError(msg *nats.Msg, metaErr error) {
+	w.logger.Error(
+		"Failed to get message metadata: %v. Acknowledging to discard.",
+		metaErr,
+	)
+
+	ackErr := msg.Ack()
+	if ackErr != nil {
+		w.logger.Error("failed to acknowledge message: %v", ackErr)
+	}
+}
+
+func (w *NatsWorker) handleMessagePipelineError(msg *nats.Msg, objectID string, pipelineErr error) {
+	w.logger.Error("Pipeline failed for '%s': %v", objectID, pipelineErr)
+
+	_, pubErr := w.jetstream.Publish(w.deadLetterSubject, msg.Data)
+	if pubErr != nil {
+		w.logger.Error(
+			"Failed to publish message to dead-letter subject for object %s: %v",
+			objectID,
+			pubErr,
+		)
+	}
+
+	ackErr := msg.Ack()
+	if ackErr != nil {
+		w.logger.Error(
+			"failed to acknowledge failed message for object %s: %v",
+			objectID,
+			ackErr,
+		)
+	}
+}
+
+func (w *NatsWorker) handleMessagePublishError(msg *nats.Msg, objectID string, publishErr error) {
+	w.logger.Error(
+		"Failed to publish processed text for object %s: %v",
+		objectID,
+		publishErr,
+	)
+
+	ackErr := msg.Ack()
+	if ackErr != nil {
+		w.logger.Error(
+			"failed to acknowledge failed message for object %s: %v",
+			objectID,
+			ackErr,
+		)
+	}
+}
+
+func (w *NatsWorker) handleEmptyMessage(msg *nats.Msg, objectID string) {
+	w.logger.Error("Received empty message for object %s. Acknowledging to discard.", objectID)
+
+	ackErr := msg.Ack()
+	if ackErr != nil {
+		w.logger.Error("failed to acknowledge empty message for object %s: %v", objectID, ackErr)
 	}
 }

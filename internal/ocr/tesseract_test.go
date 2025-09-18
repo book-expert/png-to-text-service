@@ -30,8 +30,8 @@ func TestNewProcessor(t *testing.T) {
 	require.NotNil(t, processor)
 }
 
-func TestProcessPNG_ValidationErrors(t *testing.T) {
-	t.Parallel()
+func setupTestProcessor(t *testing.T) (*ocr.Processor, context.Context) {
+	t.Helper()
 
 	config := ocr.TesseractConfig{
 		Language:       "eng",
@@ -46,7 +46,13 @@ func TestProcessPNG_ValidationErrors(t *testing.T) {
 	processor := ocr.NewProcessor(config, log)
 	ctx := context.Background()
 
-	testCases := []struct {
+	return processor, ctx
+}
+
+func TestProcessPNG_ValidationErrors(t *testing.T) {
+	t.Parallel()
+
+	var validationTestCases = []struct {
 		name           string
 		setupFile      func(t *testing.T) string
 		expectedErrMsg string
@@ -91,7 +97,9 @@ func TestProcessPNG_ValidationErrors(t *testing.T) {
 		},
 	}
 
-	for _, testCase := range testCases {
+	processor, ctx := setupTestProcessor(t)
+
+	for _, testCase := range validationTestCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 

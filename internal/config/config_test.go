@@ -40,70 +40,91 @@ func newTestConfig(t *testing.T) *config.Config {
 	apiKeyEnvName := geminiAPIKeyEnvName
 
 	return &config.Config{
-		Project: config.Project{
-			Name:        testProjectName,
-			Version:     "1.0.0",
-			Description: "Test Description",
+		Project:          newTestProjectConfig(t),
+		Paths:            newTestPathsConfig(t, tmpDir),
+		PNGToTextService: newTestPNGToTextServiceConfig(t, tmpDir, apiKeyEnvName),
+		NATS:             newTestNATSConfig(t),
+	}
+}
+
+func newTestProjectConfig(t *testing.T) config.Project {
+	t.Helper()
+
+	return config.Project{
+		Name:        testProjectName,
+		Version:     "1.0.0",
+		Description: "Test Description",
+	}
+}
+
+func newTestPathsConfig(t *testing.T, tmpDir string) config.PathsConfig {
+	t.Helper()
+
+	return config.PathsConfig{
+		BaseLogsDir: filepath.Join(tmpDir, "base_logs"),
+	}
+}
+
+func newTestPNGToTextServiceConfig(t *testing.T, tmpDir, apiKeyEnvName string) config.PNGToTextServiceConfig {
+	t.Helper()
+
+	return config.PNGToTextServiceConfig{
+		Logging: config.Logging{
+			Level:                "info",
+			Dir:                  filepath.Join(tmpDir, testLogsDirName),
+			EnableFileLogging:    true,
+			EnableConsoleLogging: true,
 		},
-		Paths: config.PathsConfig{
-			BaseLogsDir: filepath.Join(tmpDir, "base_logs"),
+		Gemini: config.Gemini{
+			APIKeyVariable:    apiKeyEnvName,
+			Models:            []string{"gemini-pro"},
+			MaxRetries:        3,
+			RetryDelaySeconds: 5,
+			TimeoutSeconds:    60,
+			Temperature:       0.5,
+			TopK:              40,
+			TopP:              0.9,
+			MaxTokens:         2048,
 		},
-		PNGToTextService: config.PNGToTextServiceConfig{
-			Logging: config.Logging{
-				Level: "info",
-				Dir: filepath.Join(
-					tmpDir,
-					testLogsDirName,
-				),
-				EnableFileLogging:    true,
-				EnableConsoleLogging: true,
-			},
-			Gemini: config.Gemini{
-				APIKeyVariable:    apiKeyEnvName,
-				Models:            []string{"gemini-pro"},
-				MaxRetries:        3,
-				RetryDelaySeconds: 5,
-				TimeoutSeconds:    60,
-				Temperature:       0.5,
-				TopK:              40,
-				TopP:              0.9,
-				MaxTokens:         2048,
-			},
-			Prompts: config.Prompts{
-				Augmentation: "Test prompt",
-			},
-			Augmentation: config.Augmentation{
-				Type:             "commentary",
-				CustomPrompt:     "",
-				UsePromptBuilder: true,
-			},
-			Tesseract: config.Tesseract{
-				Language:       "eng",
-				OEM:            3,
-				PSM:            3,
-				DPI:            300,
-				TimeoutSeconds: 60,
-			},
+		Prompts: config.Prompts{
+			Augmentation: "Test prompt",
 		},
-		NATS: config.NATSConfig{
-			URL:                      "nats://127.0.0.1:4222",
-			PDFStreamName:            "PDF_JOBS",
-			PDFConsumerName:          "pdf-workers",
-			PDFCreatedSubject:        "pdf.created",
-			PDFObjectStoreBucket:     "PDF_FILES",
-			PNGStreamName:            "PNG_PROCESSING",
-			PNGConsumerName:          "png-text-workers",
-			PNGCreatedSubject:        "png.created",
-			PNGObjectStoreBucket:     "PNG_FILES",
-			TextObjectStoreBucket:    "TEXT_FILES",
-			TTSStreamName:            "TTS_JOBS",
-			TTSConsumerName:          "tts-workers",
-			TextProcessedSubject:     "text.processed",
-			AudioChunkCreatedSubject: "audio.chunk.created",
-			AudioObjectStoreBucket:   "AUDIO_FILES",
-			TextStreamName:           "TTS_JOBS",
-			DeadLetterSubject:        "",
+		Augmentation: config.Augmentation{
+			Type:             "commentary",
+			CustomPrompt:     "",
+			UsePromptBuilder: true,
 		},
+		Tesseract: config.Tesseract{
+			Language:       "eng",
+			OEM:            3,
+			PSM:            3,
+			DPI:            300,
+			TimeoutSeconds: 60,
+		},
+	}
+}
+
+func newTestNATSConfig(t *testing.T) config.NATSConfig {
+	t.Helper()
+
+	return config.NATSConfig{
+		URL:                      "nats://127.0.0.1:4222",
+		PDFStreamName:            "PDF_JOBS",
+		PDFConsumerName:          "pdf-workers",
+		PDFCreatedSubject:        "pdf.created",
+		PDFObjectStoreBucket:     "PDF_FILES",
+		PNGStreamName:            "PNG_PROCESSING",
+		PNGConsumerName:          "png-text-workers",
+		PNGCreatedSubject:        "png.created",
+		PNGObjectStoreBucket:     "PNG_FILES",
+		TextObjectStoreBucket:    "TEXT_FILES",
+		TTSStreamName:            "TTS_JOBS",
+		TTSConsumerName:          "tts-workers",
+		TextProcessedSubject:     "text.processed",
+		AudioChunkCreatedSubject: "audio.chunk.created",
+		AudioObjectStoreBucket:   "AUDIO_FILES",
+		TextStreamName:           "TTS_JOBS",
+		DeadLetterSubject:        "",
 	}
 }
 
