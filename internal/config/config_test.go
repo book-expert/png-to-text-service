@@ -15,16 +15,12 @@ import (
 	"github.com/book-expert/png-to-text-service/internal/config"
 )
 
-const (
-	geminiAPIKeyEnvName = "GEMINI_API_KEY"
-)
-
 // Constants for test data and configuration content.
 const (
-	testProjectName       = "test-service"
-	testLogsDirName       = "logs"
-	testLogFileName       = "app.log"
-	defaultDirPermissions = 0o755
+	testProjectName     = "test-service"
+	testLogsDirName     = "logs"
+	testLogFileName     = "app.log"
+	geminiAPIKeyEnvName = "some-dummy-variable"
 )
 
 // newTestLogger creates a logger for testing purposes.

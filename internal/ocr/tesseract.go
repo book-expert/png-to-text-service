@@ -153,16 +153,13 @@ func (p *Processor) runTesseract(ctx context.Context, pngPath string) (string, e
 
 	cleanedPngPath := filepath.Clean(pngPath)
 
-	args := []string{
-		cleanedPngPath,
-		"stdout",
-		"-l", p.config.Language,
-		"--dpi", strconv.Itoa(p.config.DPI),
-		"--oem", strconv.Itoa(p.config.OEM),
-		"--psm", strconv.Itoa(p.config.PSM),
-	}
-
-	cmd := exec.CommandContext(tesseractCtx, "tesseract", args...)
+	cmd := exec.CommandContext(tesseractCtx, "tesseract")
+	cmd.Args = append(cmd.Args, cleanedPngPath)
+	cmd.Args = append(cmd.Args, "stdout")
+	cmd.Args = append(cmd.Args, "-l", p.config.Language)
+	cmd.Args = append(cmd.Args, "--dpi", strconv.Itoa(p.config.DPI))
+	cmd.Args = append(cmd.Args, "--oem", strconv.Itoa(p.config.OEM))
+	cmd.Args = append(cmd.Args, "--psm", strconv.Itoa(p.config.PSM))
 
 	// Set environment variables to limit threading for parallel processing
 	cmd.Env = append(os.Environ(),
@@ -208,16 +205,13 @@ func (p *Processor) retryTesseract(ctx context.Context, pngPath string) (string,
 
 	cleanedPngPath := filepath.Clean(pngPath)
 
-	args := []string{
-		cleanedPngPath,
-		"stdout",
-		"-l", p.config.Language,
-		"--dpi", strconv.Itoa(p.config.DPI),
-		"--oem", strconv.Itoa(p.config.OEM),
-		"--psm", "6", // More permissive PSM
-	}
-
-	cmd := exec.CommandContext(retryCtx, "tesseract", args...)
+	cmd := exec.CommandContext(retryCtx, "tesseract")
+	cmd.Args = append(cmd.Args, cleanedPngPath)
+	cmd.Args = append(cmd.Args, "stdout")
+	cmd.Args = append(cmd.Args, "-l", p.config.Language)
+	cmd.Args = append(cmd.Args, "--dpi", strconv.Itoa(p.config.DPI))
+	cmd.Args = append(cmd.Args, "--oem", strconv.Itoa(p.config.OEM))
+	cmd.Args = append(cmd.Args, "--psm", "6")
 
 	cmd.Env = append(os.Environ(),
 		"OMP_NUM_THREADS=1",
