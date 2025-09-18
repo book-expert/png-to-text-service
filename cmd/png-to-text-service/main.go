@@ -25,34 +25,25 @@ const (
 	ShutdownGracePeriodSeconds = 2
 )
 
-func main() {
-	// A temporary logger for the bootstrap process
-	log, err := logger.New(os.TempDir(), "png-to-text-bootstrap.log")
+func setupLogger(logPath string) (*logger.Logger, error) {
+	log, err := logger.New(logPath, "png-to-text-bootstrap.log")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create bootstrap logger: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("failed to create bootstrap logger: %w", err)
 	}
 
-	// Load configuration using the central configurator
-	cfg, err := config.Load("", log)
+	return log, nil
+}
+
+func loadConfig(bootstrapLog *logger.Logger) (*config.Config, error) {
+	cfg, err := config.Load("", bootstrapLog)
 	if err != nil {
-		log.Fatal("Failed to load configuration: %v", err)
+		return nil, fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Initialize the final logger based on the loaded configuration
-	log, err = logger.New(cfg.Paths.BaseLogsDir, "png-to-text-service.log")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create final logger: %v\n", err)
-		os.Exit(1)
-	}
+	return cfg, nil
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	// Initialize OCR processor from configuration
+func initOCRProcessor(cfg *config.Config, log *logger.Logger) *ocr.Processor {
 	ocrCfg := ocr.TesseractConfig{
 		Language:       cfg.PNGToTextService.Tesseract.Language,
 		OEM:            cfg.PNGToTextService.Tesseract.OEM,
@@ -60,9 +51,11 @@ func main() {
 		DPI:            cfg.PNGToTextService.Tesseract.DPI,
 		TimeoutSeconds: cfg.PNGToTextService.Tesseract.TimeoutSeconds,
 	}
-	ocrProcessor := ocr.NewProcessor(ocrCfg, log)
 
-	// Initialize Gemini processor from configuration
+	return ocr.NewProcessor(ocrCfg, log)
+}
+
+func initGeminiProcessor(cfg *config.Config, log *logger.Logger) *augment.GeminiProcessor {
 	geminiAPIKey := cfg.GetAPIKey()
 	if geminiAPIKey == "" {
 		log.Fatal(
@@ -84,8 +77,16 @@ func main() {
 		MaxTokens:         cfg.PNGToTextService.Gemini.MaxTokens,
 		RetryDelaySeconds: cfg.PNGToTextService.Gemini.RetryDelaySeconds,
 	}
-	geminiProcessor := augment.NewGeminiProcessor(geminiCfg, log)
 
+	return augment.NewGeminiProcessor(geminiCfg, log)
+}
+
+func initPipeline(
+	ocrProcessor *ocr.Processor,
+	geminiProcessor *augment.GeminiProcessor,
+	cfg *config.Config,
+	log *logger.Logger,
+) (*pipeline.Pipeline, error) {
 	mainPipeline, err := pipeline.New(
 		ocrProcessor,
 		geminiProcessor,
@@ -101,10 +102,17 @@ func main() {
 		},
 	)
 	if err != nil {
-		log.Fatal("Failed to initialize processing pipeline: %v", err)
+		return nil, fmt.Errorf("failed to initialize processing pipeline: %w", err)
 	}
 
-	// Initialize the NATS worker from configuration
+	return mainPipeline, nil
+}
+
+func initNATSWorker(
+	cfg *config.Config,
+	mainPipeline *pipeline.Pipeline,
+	log *logger.Logger,
+) (*worker.NatsWorker, error) {
 	natsWorker, err := worker.New(
 		cfg.NATS.URL,
 		cfg.NATS.PNGStreamName,
@@ -116,18 +124,69 @@ func main() {
 		log,
 	)
 	if err != nil {
-		log.Fatal("Failed to initialize NATS worker: %v", err)
+		return nil, fmt.Errorf("failed to initialize NATS worker: %w", err)
 	}
 
+	return natsWorker, nil
+}
+
+func runWorker(ctx context.Context, natsWorker *worker.NatsWorker, log *logger.Logger) {
 	go func() {
 		log.Info("Starting NATS worker...")
 
 		err := natsWorker.Run(ctx)
 		if err != nil {
 			log.Error("NATS worker stopped with error: %v", err)
-			cancel()
+			// No need to cancel context here, main will handle it.
 		}
 	}()
+}
+
+func main() {
+	// A temporary logger for the bootstrap process
+	bootstrapLog, err := setupLogger(os.TempDir())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create bootstrap logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Load configuration using the central configurator
+	cfg, err := loadConfig(bootstrapLog)
+	if err != nil {
+		bootstrapLog.Fatal("Failed to load configuration: %v", err)
+	}
+
+	// Initialize the final logger based on the loaded configuration
+	log, err := setupLogger(cfg.Paths.BaseLogsDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to create final logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Initialize OCR processor from configuration
+	ocrProcessor := initOCRProcessor(cfg, log)
+
+	// Initialize Gemini processor from configuration
+	geminiProcessor := initGeminiProcessor(cfg, log)
+
+	mainPipeline, err := initPipeline(ocrProcessor, geminiProcessor, cfg, log)
+	if err != nil {
+		log.Fatal("Failed to initialize processing pipeline: %v", err)
+	}
+
+	// Initialize the NATS worker from configuration
+	natsWorker, err := initNATSWorker(cfg, mainPipeline, log)
+	if err != nil {
+		log.Fatal("Failed to initialize NATS worker: %v", err)
+	}
+
+	runWorker(ctx, natsWorker, log)
 
 	<-sigChan
 	log.Info("Shutdown signal received, gracefully shutting down...")
