@@ -133,21 +133,28 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 		return
 	}
 
-	objectID := "seq-" + strconv.FormatUint(meta.Sequence.Stream, 10)
-	pngData := msg.Data
-
-	if len(pngData) == 0 {
-		w.handleEmptyMessage(msg, objectID)
-
+	var event events.PNGCreatedEvent
+	if err := json.Unmarshal(msg.Data(), &event); err != nil {
+		w.handleProcessingError(msg, fmt.Errorf("failed to unmarshal PNGCreatedEvent: %w", err))
 		return
 	}
 
-	processedText, pipelineErr := w.pipeline.Process(ctx, objectID, pngData)
-	if pipelineErr != nil {
-		w.handleMessagePipelineError(msg, objectID, pipelineErr)
+	w.logger.Info("Processing job for object: %s", event.PNGKey)
 
+	pngData, err := w.pngStore.Get(ctx, event.PNGKey)
+	if err != nil {
+		w.handleProcessingError(msg, fmt.Errorf("failed to get PNG '%s' from object store: %w", event.PNGKey, err))
 		return
 	}
+	defer pngData.Close()
+
+	pngBytes, err := io.ReadAll(pngData)
+	if err != nil {
+		w.handleProcessingError(msg, fmt.Errorf("failed to read PNG data for '%s': %w", event.PNGKey, err))
+		return
+	}
+
+	text, err := w.pipeline.Process(ctx, event.PNGKey, pngBytes)
 
 	_, publishErr := w.jetstream.Publish(w.outputSubject, []byte(processedText))
 	if publishErr != nil {
