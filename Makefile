@@ -34,6 +34,7 @@ lint:
 	@go vet ./...
 	@golangci-lint run --fix ./...
 	@golangci-lint cache clean
+	@go clean -cache
 
 
 
