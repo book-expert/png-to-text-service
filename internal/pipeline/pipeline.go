@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/book-expert/logger"
 
@@ -50,14 +49,9 @@ func New(
 	minTextLength int,
 	augOpts *augment.AugmentationOptions,
 ) (*Pipeline, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return nil, fmt.Errorf("could not get current working directory: %w", err)
-	}
+	localTmpDir := os.TempDir()
 
-	localTmpDir := filepath.Join(cwd, "tmp")
-
-	err = os.MkdirAll(localTmpDir, defaultDirPermissions)
+	err := os.MkdirAll(localTmpDir, defaultDirPermissions)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"could not create local temp directory '%s': %w",

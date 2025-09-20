@@ -7,6 +7,7 @@ require (
 	github.com/book-expert/events v0.2.4
 	github.com/book-expert/logger v0.1.3
 	github.com/book-expert/prompt-builder v0.2.1
+	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats.go v1.45.0
 	github.com/stretchr/testify v1.11.1
 )

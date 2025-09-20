@@ -2,6 +2,7 @@
 package worker
 
 import (
+	"bytes" // New import
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/book-expert/events"
 	"github.com/book-expert/logger"
+	"github.com/google/uuid" // New import
 	"github.com/nats-io/nats.go"
 )
 
@@ -32,6 +34,7 @@ type Pipeline interface {
 type NatsWorker struct {
 	jetstream         nats.JetStreamContext
 	pngStore          nats.ObjectStore
+	textStore         nats.ObjectStore // New field for TEXT_FILES object store
 	pipeline          Pipeline
 	nc                *nats.Conn
 	logger            *logger.Logger
@@ -48,6 +51,7 @@ func New(
 	pipeline Pipeline,
 	log *logger.Logger,
 	pngStore nats.ObjectStore,
+	textStore nats.ObjectStore, // New parameter
 ) (*NatsWorker, error) {
 	natsConn, err := nats.Connect(
 		natsURL,
@@ -78,6 +82,7 @@ func New(
 		nc:                natsConn,
 		jetstream:         jetstream,
 		pngStore:          pngStore,
+		textStore:         textStore, // Initialize new field
 		streamName:        streamName,
 		subject:           subject,
 		consumer:          consumer,
@@ -131,7 +136,7 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 	// handleMsg processes a single NATS message.
 	startTime := time.Now()
 
-	_, metaErr := msg.Metadata()
+	metaErr := w.checkMessageMetadata(msg)
 	if metaErr != nil {
 		w.handleMessageMetadataError(msg, metaErr)
 
@@ -139,7 +144,9 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 	}
 
 	var event events.PNGCreatedEvent
-	if err := json.Unmarshal(msg.Data, &event); err != nil {
+
+	err := json.Unmarshal(msg.Data, &event)
+	if err != nil {
 		w.handleMessageMetadataError(
 			msg,
 			fmt.Errorf("failed to unmarshal PNGCreatedEvent: %w", err),
@@ -150,48 +157,17 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 
 	w.logger.Info("Processing job for object: %s", event.PNGKey)
 
-	pngData, err := w.pngStore.Get(event.PNGKey)
-	if err != nil {
-		w.handleMessagePipelineError(
-			msg,
-			event.PNGKey,
-			fmt.Errorf("failed to get PNG '%s' from object store: %w", event.PNGKey, err),
-		)
-
-		return
-	}
-	defer pngData.Close()
-
-	pngBytes, err := io.ReadAll(pngData)
-	if err != nil {
-		w.handleMessagePipelineError(
-			msg,
-			event.PNGKey,
-			fmt.Errorf("failed to read PNG data for '%s': %w", event.PNGKey, err),
-		)
+	textKey, processErr := w.processAndPublishText(ctx, msg, &event) // Get textKey here
+	if processErr != nil {
+		w.handleMessagePipelineError(msg, event.PNGKey, processErr)
 
 		return
 	}
 
-	text, err := w.pipeline.Process(ctx, event.PNGKey, pngBytes)
-	if err != nil {
-		w.handleMessagePipelineError(
-			msg,
-			event.PNGKey,
-			fmt.Errorf("pipeline failed for '%s': %w", event.PNGKey, err),
-		)
-
-		return
-	}
-
-	_, publishErr := w.jetstream.Publish(w.outputSubject, []byte(text))
-	if publishErr != nil {
-		w.handleMessagePublishError(msg, event.PNGKey, publishErr)
-
-		return
-	}
-
-	w.logger.Success("Processed %s in %s", event.PNGKey, time.Since(startTime))
+	w.logger.Success(
+		"Processed %s and published TextProcessedEvent with TextKey %s in %s",
+		event.PNGKey, textKey, time.Since(startTime), // Use textKey here
+	)
 
 	ackErr := msg.Ack()
 	if ackErr != nil {
@@ -201,6 +177,86 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg *nats.Msg) {
 			ackErr,
 		)
 	}
+}
+
+func (w *NatsWorker) processAndPublishText(
+	ctx context.Context,
+	_ *nats.Msg,
+	event *events.PNGCreatedEvent,
+) (string, error) {
+	pngData, err := w.pngStore.Get(event.PNGKey)
+	if err != nil {
+		return "", fmt.Errorf("failed to get PNG '%s' from object store: %w", event.PNGKey, err)
+	}
+
+	defer func() {
+		closeErr := pngData.Close()
+		if closeErr != nil {
+			w.logger.Error("failed to close pngData: %v", closeErr)
+		}
+	}()
+
+	pngBytes, err := io.ReadAll(pngData)
+	if err != nil {
+		return "", fmt.Errorf("failed to read PNG data for '%s': %w", event.PNGKey, err)
+	}
+
+	text, err := w.pipeline.Process(ctx, event.PNGKey, pngBytes)
+	if err != nil {
+		return "", fmt.Errorf("pipeline failed for '%s': %w", event.PNGKey, err)
+	}
+
+	// Generate a unique key for the text object
+	textKey := fmt.Sprintf("%s/%s/text_%s.txt", event.Header.TenantID, event.Header.WorkflowID, uuid.NewString())
+
+	// Upload the text to the object store
+	_, uploadErr := w.textStore.Put(&nats.ObjectMeta{
+		Name: textKey,
+		Description: fmt.Sprintf("Processed text for PNG: %s, Page: %d/%d",
+			event.PNGKey, event.PageNumber, event.TotalPages),
+		Headers:  nil,
+		Metadata: nil,
+		Opts:     nil,
+	}, bytes.NewReader([]byte(text)))
+	if uploadErr != nil {
+		return "", fmt.Errorf("failed to upload processed text to object store: %w", uploadErr)
+	}
+
+	// Construct and publish the TextProcessedEvent
+	textEvent := events.TextProcessedEvent{
+		Header:            event.Header,
+		PNGKey:            event.PNGKey,
+		TextKey:           textKey, // Use the key from the uploaded object
+		PageNumber:        event.PageNumber,
+		TotalPages:        event.TotalPages,
+		Voice:             "",  // Initialize with zero value
+		Seed:              0,   // Initialize with zero value
+		NGL:               0,   // Initialize with zero value
+		TopP:              0.0, // Initialize with zero value
+		RepetitionPenalty: 0.0, // Initialize with zero value
+		Temperature:       0.0, // Initialize with zero value
+	}
+
+	eventJSON, marshalErr := json.Marshal(textEvent)
+	if marshalErr != nil {
+		return "", fmt.Errorf("failed to marshal TextProcessedEvent: %w", marshalErr)
+	}
+
+	_, publishErr := w.jetstream.Publish(w.outputSubject, eventJSON)
+	if publishErr != nil {
+		return "", fmt.Errorf("failed to publish TextProcessedEvent: %w", publishErr)
+	}
+
+	return textKey, nil // Return the textKey
+}
+
+func (w *NatsWorker) checkMessageMetadata(msg *nats.Msg) error {
+	_, metaErr := msg.Metadata()
+	if metaErr != nil {
+		return fmt.Errorf("failed to get message metadata: %w", metaErr)
+	}
+
+	return nil
 }
 
 func (w *NatsWorker) handleMessageMetadataError(msg *nats.Msg, metaErr error) {
@@ -234,31 +290,5 @@ func (w *NatsWorker) handleMessagePipelineError(msg *nats.Msg, objectID string, 
 			objectID,
 			ackErr,
 		)
-	}
-}
-
-func (w *NatsWorker) handleMessagePublishError(msg *nats.Msg, objectID string, publishErr error) {
-	w.logger.Error(
-		"Failed to publish processed text for object %s: %v",
-		objectID,
-		publishErr,
-	)
-
-	ackErr := msg.Ack()
-	if ackErr != nil {
-		w.logger.Error(
-			"failed to acknowledge failed message for object %s: %v",
-			objectID,
-			ackErr,
-		)
-	}
-}
-
-func (w *NatsWorker) handleEmptyMessage(msg *nats.Msg, objectID string) {
-	w.logger.Error("Received empty message for object %s. Acknowledging to discard.", objectID)
-
-	ackErr := msg.Ack()
-	if ackErr != nil {
-		w.logger.Error("failed to acknowledge empty message for object %s: %v", objectID, ackErr)
 	}
 }
