@@ -1,88 +1,125 @@
 # PNG-to-Text Service
 
-A service that performs OCR on PNG images to extract text and optionally augments it with AI-generated commentary.
+## Project Summary
+
+A NATS-based microservice that performs OCR on PNG images to extract text and optionally augments it with AI-generated commentary.
 
 ## Detailed Description
 
-This service provides a robust pipeline for converting PNG images into structured text. It is designed to handle large volumes of images concurrently, making it suitable for batch processing tasks.
+This service listens for `PNGCreatedEvent` messages on a NATS stream. When a message is received, it downloads the PNG file from a NATS object store, performs OCR to extract the text, and then publishes a `TextProcessedEvent` to a NATS stream.
 
-The core workflow consists of three main stages:
-1.  **Extract**: Raw text is extracted from PNG images using the Tesseract OCR engine. The text is then cleaned to remove common OCR artifacts.
-2.  **Augment (Optional)**: If enabled, the extracted text and the source image are sent to a multimodal AI model (e.g., Google Gemini) to generate additional context, such as a summary or commentary.
-3.  **Output**: The final text, either the cleaned OCR output or the AI-augmented version, is saved to a file.
+An optional augmentation step can be enabled, where the extracted text and the source image are sent to a multimodal AI model (e.g., Google Gemini) to generate additional context, such as a summary or commentary.
 
-The service is configured via a `project.toml` file, which can be loaded from a local path or a URL, and is designed to be run as a worker processing jobs from a NATS message queue.
+Core capabilities include:
+
+-   **NATS Integration**: Seamlessly integrates with NATS for messaging and object storage.
+-   **OCR Processing**: Extracts text from PNG images using Tesseract OCR.
+-   **AI Augmentation**: Optionally augments the extracted text with AI-generated content.
+-   **Robust Error Handling**: Implements `ack`, `nak`, and `term` logic for handling NATS messages.
 
 ## Technology Stack
 
-*   **Language:** Go (1.23+)
-*   **OCR Engine:** Tesseract
-*   **AI Integration:** Google Gemini (pluggable for other providers)
-*   **Messaging:** NATS
+-   **Programming Language:** Go 1.25
+-   **Messaging:** NATS
+-   **OCR Engine:** Tesseract
+-   **AI Integration:** Google Gemini
+-   **Libraries:**
+    -   `github.com/nats-io/nats.go`
+    -   `github.com/book-expert/configurator`
+    -   `github.com/book-expert/events`
+    -   `github.com/book-expert/logger`
+    -   `github.com/book-expert/prompt-builder`
+    -   `github.com/google/uuid`
+    -   `github.com/stretchr/testify`
 
 ## Getting Started
 
 ### Prerequisites
 
-- **Go**: Version 1.23 or later must be installed.
-  ```bash
-  # Example for Ubuntu/Debian
-  sudo apt-get update && sudo apt-get install golang
-  ```
-- **Tesseract OCR**: The Tesseract binary must be in your system's `PATH`.
-  ```bash
-  # Example for Ubuntu/Debian
-  sudo apt-get update && sudo apt-get install tesseract-ocr
-  ```
-- **Make**: The `make` utility is required to build and test the project.
-  ```bash
-  # Example for Ubuntu/Debian
-  sudo apt-get update && sudo apt-get install make
-  ```
-- **AI Provider API Key**: If using AI augmentation, an API key from your provider is required. This should be set as an environment variable (e.g., `GEMINI_API_KEY`).
-  ```bash
-  export GEMINI_API_KEY="your-api-key-here"
-  ```
-- **Configuration File**: A `project.toml` file is required for configuration. The path to this file (local or URL) must be set in the `PROJECT_TOML` environment variable.
-  ```bash
-  export PROJECT_TOML="/path/to/your/project.toml"
-  # Or from a URL
-  export PROJECT_TOML="https://example.com/project.toml"
-  ```
+-   Go 1.25 or later.
+-   NATS server with JetStream enabled.
+-   Tesseract OCR (`tesseract`) installed and available in the system's `PATH`.
+-   An API key for the AI provider (e.g., Google Gemini), set as an environment variable.
 
 ### Installation
 
-1.  Clone the repository:
-    ```bash
-    git clone <repository-url>
-    ```
-2.  Navigate to the project directory:
-    ```bash
-    cd png-to-text-service
-    ```
-3.  Build the application:
-    ```bash
-    make build
-    ```
-    This will create the `png-to-text-service` binary in the `bin/` directory.
+To build the service, you can use the `make build` command:
+
+```bash
+make build
+```
+
+This will create the `png-to-text-service` binary in the `bin` directory.
+
+### Configuration
+
+The service requires a TOML configuration file to be accessible via a URL specified by the `PROJECT_TOML` environment variable. The configuration file should have the following structure:
+
+```toml
+[nats]
+url = "nats://localhost:4222"
+png_stream_name = "pngs"
+png_consumer_name = "png_processor"
+png_created_subject = "png.created"
+png_object_store_bucket = "png_images"
+text_stream_name = "texts"
+text_processed_subject = "text.processed"
+text_object_store_bucket = "text_files"
+dead_letter_subject = "dead.letters"
+
+[paths]
+base_logs_dir = "/var/log/png-to-text-service"
+
+[png_to_text_service]
+
+[png_to_text_service.tesseract]
+language = "eng"
+oem = 3
+psm = 3
+dpi = 300
+timeout_seconds = 60
+
+[png_to_text_service.gemini]
+api_key_variable = "GEMINI_API_KEY"
+models = ["gemini-pro-vision"]
+temperature = 0.7
+timeout_seconds = 120
+max_retries = 3
+retry_delay_seconds = 5
+top_k = 40
+top_p = 0.95
+max_tokens = 2048
+
+[png_to_text_service.augmentation]
+use_prompt_builder = true
+type = "summary"
+custom_prompt = ""
+
+[png_to_text_service.augmentation.parameters]
+param1 = "value1"
+param2 = "value2"
+
+[png_to_text_service.prompts]
+augmentation = "Summarize the following text: {{.Text}}"
+```
 
 ## Usage
 
-The service is run as a NATS worker. It connects to a NATS server, subscribes to a subject, and processes messages as they arrive.
+To run the service, execute the binary:
 
 ```bash
-# Run the service as a NATS worker (requires NATS server and environment variables set)
 ./bin/png-to-text-service
 ```
 
+The service will connect to NATS and start listening for messages.
+
 ## Testing
 
-To run the complete suite of automated tests, execute the following command:
+To run the tests for this service, you can use the `make test` command:
 
 ```bash
 make test
 ```
-This will run all unit and integration tests and display the results.
 
 ## License
 
