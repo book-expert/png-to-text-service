@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/book-expert/logger"
+	"github.com/nats-io/nats.go"
 
 	"github.com/book-expert/png-to-text-service/internal/augment"
 	"github.com/book-expert/png-to-text-service/internal/config"
@@ -108,11 +110,53 @@ func initPipeline(
 	return mainPipeline, nil
 }
 
+func setupJetStream(ctx context.Context, js nats.JetStreamContext, cfg *config.Config) error {
+	// Setup PNG_PROCESSING stream
+	pngStreamCfg := &nats.StreamConfig{
+		Name:     cfg.NATS.PNGStreamName,
+		Subjects: []string{cfg.NATS.PNGCreatedSubject},
+		Retention: nats.WorkQueuePolicy,
+	}
+	_, err := js.AddStream(pngStreamCfg)
+	if err != nil && !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
+		return fmt.Errorf("failed to create PNG_PROCESSING stream: %w", err)
+	}
+
+	// Setup TTS_JOBS stream
+	ttsStreamCfg := &nats.StreamConfig{
+		Name:     cfg.NATS.TextStreamName,
+		Subjects: []string{cfg.NATS.TextProcessedSubject},
+		Retention: nats.WorkQueuePolicy,
+	}
+	_, err = js.AddStream(ttsStreamCfg)
+	if err != nil && !errors.Is(err, nats.ErrStreamNameAlreadyInUse) {
+		return fmt.Errorf("failed to create TTS_JOBS stream: %w", err)
+	}
+
+	return nil
+}
+
+func getPNGObjectStore(ctx context.Context, js nats.JetStreamContext, cfg *config.Config) (nats.ObjectStore, error) {
+	pngStore, err := js.ObjectStore(cfg.NATS.PNGObjectStoreBucket)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind to PNG object store: %w", err)
+	}
+	return pngStore, nil
+}
+
 func initNATSWorker(
+	ctx context.Context,
 	cfg *config.Config,
 	mainPipeline *pipeline.Pipeline,
 	log *logger.Logger,
+	js nats.JetStreamContext,
 ) (*worker.NatsWorker, error) {
+	// Get PNG object store
+	pngStore, err := getPNGObjectStore(ctx, js, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get PNG object store: %w", err)
+	}
+
 	natsWorker, err := worker.New(
 		cfg.NATS.URL,
 		cfg.NATS.PNGStreamName,
@@ -122,6 +166,7 @@ func initNATSWorker(
 		cfg.NATS.DeadLetterSubject,
 		mainPipeline,
 		log,
+		pngStore,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize NATS worker: %w", err)
@@ -169,6 +214,24 @@ func run() error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Initialize NATS connection and JetStream context
+	nc, err := nats.Connect(cfg.NATS.URL)
+	if err != nil {
+		return fmt.Errorf("failed to connect to NATS: %w", err)
+	}
+	defer nc.Close()
+
+	js, err := nc.JetStream()
+	if err != nil {
+		return fmt.Errorf("failed to get JetStream context: %w", err)
+	}
+
+	// Setup JetStream streams
+	err = setupJetStream(ctx, js, cfg)
+	if err != nil {
+		return fmt.Errorf("failed to setup JetStream streams: %w", err)
+	}
+
 	// Initialize OCR processor from configuration
 	ocrProcessor := initOCRProcessor(cfg, log)
 
@@ -183,7 +246,7 @@ func run() error {
 	}
 
 	// Initialize the NATS worker from configuration
-	natsWorker, err := initNATSWorker(cfg, mainPipeline, log)
+	natsWorker, err := initNATSWorker(ctx, cfg, mainPipeline, log, js)
 	if err != nil {
 		log.Error("Failed to initialize NATS worker: %v", err)
 
