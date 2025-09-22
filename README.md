@@ -30,8 +30,7 @@ flowchart TD
         cfg --> js --> pipe --> worker
     end
 
-    jetStream[[PNG stream
-    (png.created)]]
+    jetStream[["PNG stream<br/>(png.created)"]]
     jetStream --> pull[Pull message]
     pull --> fetch[Fetch PNG bytes]
     fetch --> process[Pipeline.Process]
