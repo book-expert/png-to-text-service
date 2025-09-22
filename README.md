@@ -23,29 +23,38 @@ Core capabilities include:
 ```mermaid
 flowchart TD
     subgraph Bootstrap
-        cfg[Load configuration & loggers<br/>cmd/png-to-text-service/main.go:41-363]
-        js[Create JetStream streams & ensure object stores<br/>cmd/png-to-text-service/main.go:115-311]
-        pipe[Attach OCR & Gemini processors to pipeline<br/>cmd/png-to-text-service/main.go:88-357]
-        worker[Start NATS worker loop<br/>cmd/png-to-text-service/main.go:366-426]
+        cfg[Load config & loggers]
+        js[Ensure JetStream streams & stores]
+        pipe[Wire OCR + Gemini pipeline]
+        worker[Launch NATS worker]
         cfg --> js --> pipe --> worker
     end
 
-    jetStream[[PNG stream (png.created)<br/>NATS JetStream]]
-    jetStream --> pull[Pull message via PullSubscribe<br/>internal/worker/worker.go:109-193]
-    pull --> fetch[Fetch PNG bytes from object store<br/>internal/worker/worker.go:223-241]
-    fetch --> process[Pipeline.Process(object, bytes)<br/>internal/pipeline/pipeline.go:74-131]
-    process --> temp[Persist temp PNG in /tmp<br/>internal/pipeline/pipeline.go:85-160]
-    temp --> ocr[Run Tesseract OCR & clean text<br/>internal/ocr/tesseract.go:93-196]
-    ocr --> minCheck{Text length ≥ MinTextLength?<br/>cmd/png-to-text-service/main.go:25-107}
-    minCheck -->|No| useClean[Use cleaned OCR text only]
-    minCheck -->|Yes| augment[Augment with Gemini models<br/>internal/augment/gemini.go:139-205]
+    jetStream[[PNG stream
+    (png.created)]]
+    jetStream --> pull[Pull message]
+    pull --> fetch[Fetch PNG bytes]
+    fetch --> process[Pipeline.Process]
+    process --> temp[Persist temp PNG]
+    temp --> ocr[Run Tesseract OCR]
+    ocr --> minCheck{Text length ≥ MinTextLength?}
+    minCheck -->|No| useClean[Skip augmentation]
+    minCheck -->|Yes| augment[Call Gemini]
     augment --> useClean
-    useClean --> store[Put text into TEXT_FILES object store<br/>internal/worker/worker.go:253-275]
-    store --> publish[Publish TextProcessedEvent + TTS defaults<br/>internal/worker/worker.go:278-305]
-    publish --> ack[Acknowledge original PNG message<br/>internal/worker/worker.go:185-192]
-    process -->|Error| deadLetter[Publish to dead-letter subject & Ack<br/>internal/worker/worker.go:329-348]
+    useClean --> store[Store text object]
+    store --> publish[Publish TextProcessedEvent]
+    publish --> ack[Ack original message]
+    process -->|Error| deadLetter[Send to dead-letter]
     deadLetter --> ack
 ```
+
+Key implementation touchpoints:
+
+- `cmd/png-to-text-service/main.go:41-426` bootstraps logging, configuration, JetStream resources, and launches the worker.
+- `internal/worker/worker.go:109-348` pulls `PNGCreatedEvent` messages, drives the pipeline, and handles acknowledgements or dead-letter routing.
+- `internal/pipeline/pipeline.go:74-160` writes the PNG to a temporary file, invokes OCR, and conditionally augments the text.
+- `internal/ocr/tesseract.go:93-196` validates the PNG input and executes Tesseract plus post-processing cleanup.
+- `internal/augment/gemini.go:139-205` builds prompts and interacts with Gemini to enrich the OCR output when enabled.
 
 ## Technology Stack
 
