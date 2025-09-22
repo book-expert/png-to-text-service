@@ -13,9 +13,39 @@ An optional augmentation step can be enabled, where the extracted text and the s
 Core capabilities include:
 
 -   **NATS Integration**: Seamlessly integrates with NATS for messaging and object storage.
--   **OCR Processing**: Extracts text from PNG images using Tesseract OCR.
--   **AI Augmentation**: Optionally augments the extracted text with AI-generated content.
-Robust Error Handling: Implements explicit NATS message acknowledgment (Ack) for successful processing. For pipeline errors, the original message is published to a dead-letter subject and then acknowledged, preventing reprocessing loops.
+-   **OCR Processing**: Extracts text from PNG images using Tesseract OCR and cleans the output.
+-   **AI Augmentation**: Optionally augments the extracted text with AI-generated content using Gemini models.
+-   **Persistent Output**: Stores the processed text in a NATS object store before emitting downstream events.
+-   **Robust Error Handling**: Implements explicit NATS message acknowledgment (Ack) for successful processing. For pipeline errors, the original message is published to a dead-letter subject and then acknowledged, preventing reprocessing loops.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    subgraph Bootstrap
+        cfg[Load configuration & loggers<br/>cmd/png-to-text-service/main.go:41-363]
+        js[Create JetStream streams & ensure object stores<br/>cmd/png-to-text-service/main.go:115-311]
+        pipe[Attach OCR & Gemini processors to pipeline<br/>cmd/png-to-text-service/main.go:88-357]
+        worker[Start NATS worker loop<br/>cmd/png-to-text-service/main.go:366-426]
+        cfg --> js --> pipe --> worker
+    end
+
+    jetStream[[PNG stream (png.created)<br/>NATS JetStream]]
+    jetStream --> pull[Pull message via PullSubscribe<br/>internal/worker/worker.go:109-193]
+    pull --> fetch[Fetch PNG bytes from object store<br/>internal/worker/worker.go:223-241]
+    fetch --> process[Pipeline.Process(object, bytes)<br/>internal/pipeline/pipeline.go:74-131]
+    process --> temp[Persist temp PNG in /tmp<br/>internal/pipeline/pipeline.go:85-160]
+    temp --> ocr[Run Tesseract OCR & clean text<br/>internal/ocr/tesseract.go:93-196]
+    ocr --> minCheck{Text length ≥ MinTextLength?<br/>cmd/png-to-text-service/main.go:25-107}
+    minCheck -->|No| useClean[Use cleaned OCR text only]
+    minCheck -->|Yes| augment[Augment with Gemini models<br/>internal/augment/gemini.go:139-205]
+    augment --> useClean
+    useClean --> store[Put text into TEXT_FILES object store<br/>internal/worker/worker.go:253-275]
+    store --> publish[Publish TextProcessedEvent + TTS defaults<br/>internal/worker/worker.go:278-305]
+    publish --> ack[Acknowledge original PNG message<br/>internal/worker/worker.go:185-192]
+    process -->|Error| deadLetter[Publish to dead-letter subject & Ack<br/>internal/worker/worker.go:329-348]
+    deadLetter --> ack
+```
 
 ## Technology Stack
 
@@ -101,6 +131,14 @@ param2 = "value2"
 
 [png_to_text_service.prompts]
 augmentation = "Summarize the following text: {{.Text}}"
+
+[png_to_text_service.tts_defaults]
+voice = "alloy"
+seed = 123
+ngl = 4
+top_p = 0.95
+repetition_penalty = 1.05
+temperature = 0.7
 ```
 
 ## Usage
@@ -112,6 +150,13 @@ To run the service, execute the binary:
 ```
 
 The service will connect to NATS and start listening for messages.
+
+A successful run for each message will:
+
+- download the PNG bytes from the configured `png_object_store_bucket`
+- write the final text artifact to the `text_object_store_bucket`
+- publish a `TextProcessedEvent` containing the text object key and default TTS parameters
+- acknowledge the original message (or forward to the dead-letter subject if processing fails)
 
 ## Testing
 
