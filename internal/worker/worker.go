@@ -30,6 +30,16 @@ type Pipeline interface {
 	Process(ctx context.Context, objectID string, data []byte) (string, error)
 }
 
+// TTSDefaults holds default parameters for downstream text-to-speech processing.
+type TTSDefaults struct {
+	Voice             string
+	Seed              int
+	NGL               int
+	TopP              float64
+	RepetitionPenalty float64
+	Temperature       float64
+}
+
 // NatsWorker manages the NATS connection and message consumption.
 type NatsWorker struct {
 	jetstream         nats.JetStreamContext
@@ -43,6 +53,7 @@ type NatsWorker struct {
 	consumer          string
 	outputSubject     string
 	deadLetterSubject string
+	ttsDefaults       TTSDefaults
 }
 
 // New creates a new NatsWorker.
@@ -52,6 +63,7 @@ func New(
 	log *logger.Logger,
 	pngStore nats.ObjectStore,
 	textStore nats.ObjectStore, // New parameter
+	ttsDefaults TTSDefaults,
 ) (*NatsWorker, error) {
 	natsConn, err := nats.Connect(
 		natsURL,
@@ -90,6 +102,7 @@ func New(
 		logger:            log,
 		outputSubject:     outputSubject,
 		deadLetterSubject: deadLetterSubject,
+		ttsDefaults:       ttsDefaults,
 	}, nil
 }
 
@@ -184,70 +197,112 @@ func (w *NatsWorker) processAndPublishText(
 	_ *nats.Msg,
 	event *events.PNGCreatedEvent,
 ) (string, error) {
-	pngData, err := w.pngStore.Get(event.PNGKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to get PNG '%s' from object store: %w", event.PNGKey, err)
+	pngBytes, readErr := w.fetchPNGBytes(event)
+	if readErr != nil {
+		return "", readErr
+	}
+
+	processedText, processErr := w.pipeline.Process(ctx, event.PNGKey, pngBytes)
+	if processErr != nil {
+		return "", fmt.Errorf("pipeline failed for '%s': %w", event.PNGKey, processErr)
+	}
+
+	textObjectKey, storeErr := w.storeProcessedText(event, processedText)
+	if storeErr != nil {
+		return "", storeErr
+	}
+
+	publishErr := w.publishTextProcessedEvent(event, textObjectKey)
+	if publishErr != nil {
+		return "", publishErr
+	}
+
+	return textObjectKey, nil
+}
+
+func (w *NatsWorker) fetchPNGBytes(event *events.PNGCreatedEvent) ([]byte, error) {
+	pngDataReader, objectStoreErr := w.pngStore.Get(event.PNGKey)
+	if objectStoreErr != nil {
+		return nil, fmt.Errorf("failed to get PNG '%s' from object store: %w", event.PNGKey, objectStoreErr)
 	}
 
 	defer func() {
-		closeErr := pngData.Close()
+		closeErr := pngDataReader.Close()
 		if closeErr != nil {
-			w.logger.Error("failed to close pngData: %v", closeErr)
+			w.logger.Error("failed to close pngDataReader: %v", closeErr)
 		}
 	}()
 
-	pngBytes, err := io.ReadAll(pngData)
-	if err != nil {
-		return "", fmt.Errorf("failed to read PNG data for '%s': %w", event.PNGKey, err)
+	pngDataBytes, readErr := io.ReadAll(pngDataReader)
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read PNG data for '%s': %w", event.PNGKey, readErr)
 	}
 
-	text, err := w.pipeline.Process(ctx, event.PNGKey, pngBytes)
-	if err != nil {
-		return "", fmt.Errorf("pipeline failed for '%s': %w", event.PNGKey, err)
+	return pngDataBytes, nil
+}
+
+func generateTextObjectKey(event *events.PNGCreatedEvent) string {
+	return fmt.Sprintf(
+		"%s/%s/text_%s.txt",
+		event.Header.TenantID,
+		event.Header.WorkflowID,
+		uuid.NewString(),
+	)
+}
+
+func (w *NatsWorker) storeProcessedText(event *events.PNGCreatedEvent, processedText string) (string, error) {
+	textObjectKey := generateTextObjectKey(event)
+	objectDescription := fmt.Sprintf(
+		"Processed text for PNG: %s, Page: %d/%d",
+		event.PNGKey,
+		event.PageNumber,
+		event.TotalPages,
+	)
+
+	objectMeta := nats.ObjectMeta{
+		Name:        textObjectKey,
+		Description: objectDescription,
+		Headers:     nil,
+		Metadata:    nil,
+		Opts:        nil,
 	}
 
-	// Generate a unique key for the text object
-	textKey := fmt.Sprintf("%s/%s/text_%s.txt", event.Header.TenantID, event.Header.WorkflowID, uuid.NewString())
-
-	// Upload the text to the object store
-	_, uploadErr := w.textStore.Put(&nats.ObjectMeta{
-		Name: textKey,
-		Description: fmt.Sprintf("Processed text for PNG: %s, Page: %d/%d",
-			event.PNGKey, event.PageNumber, event.TotalPages),
-		Headers:  nil,
-		Metadata: nil,
-		Opts:     nil,
-	}, bytes.NewReader([]byte(text)))
+	_, uploadErr := w.textStore.Put(&objectMeta, bytes.NewReader([]byte(processedText)))
 	if uploadErr != nil {
 		return "", fmt.Errorf("failed to upload processed text to object store: %w", uploadErr)
 	}
 
-	// Construct and publish the TextProcessedEvent
-	textEvent := events.TextProcessedEvent{
+	return textObjectKey, nil
+}
+
+func (w *NatsWorker) publishTextProcessedEvent(event *events.PNGCreatedEvent, textObjectKey string) error {
+	defaults := w.ttsDefaults
+
+	processedEvent := events.TextProcessedEvent{
 		Header:            event.Header,
 		PNGKey:            event.PNGKey,
-		TextKey:           textKey, // Use the key from the uploaded object
+		TextKey:           textObjectKey,
 		PageNumber:        event.PageNumber,
 		TotalPages:        event.TotalPages,
-		Voice:             "",  // Initialize with zero value
-		Seed:              0,   // Initialize with zero value
-		NGL:               0,   // Initialize with zero value
-		TopP:              0.0, // Initialize with zero value
-		RepetitionPenalty: 0.0, // Initialize with zero value
-		Temperature:       0.0, // Initialize with zero value
+		Voice:             defaults.Voice,
+		Seed:              defaults.Seed,
+		NGL:               defaults.NGL,
+		TopP:              defaults.TopP,
+		RepetitionPenalty: defaults.RepetitionPenalty,
+		Temperature:       defaults.Temperature,
 	}
 
-	eventJSON, marshalErr := json.Marshal(textEvent)
+	eventJSON, marshalErr := json.Marshal(processedEvent)
 	if marshalErr != nil {
-		return "", fmt.Errorf("failed to marshal TextProcessedEvent: %w", marshalErr)
+		return fmt.Errorf("failed to marshal TextProcessedEvent: %w", marshalErr)
 	}
 
 	_, publishErr := w.jetstream.Publish(w.outputSubject, eventJSON)
 	if publishErr != nil {
-		return "", fmt.Errorf("failed to publish TextProcessedEvent: %w", publishErr)
+		return fmt.Errorf("failed to publish TextProcessedEvent: %w", publishErr)
 	}
 
-	return textKey, nil // Return the textKey
+	return nil
 }
 
 func (w *NatsWorker) checkMessageMetadata(msg *nats.Msg) error {

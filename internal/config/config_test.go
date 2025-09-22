@@ -102,6 +102,14 @@ func newTestPNGToTextServiceConfig(t *testing.T, tmpDir, apiKeyEnvName string) c
 			DPI:            300,
 			TimeoutSeconds: 60,
 		},
+		TTSDefaults: config.TTSDefaults{
+			Voice:             "test-voice",
+			Seed:              123,
+			NGL:               4,
+			TopP:              0.9,
+			RepetitionPenalty: 1.05,
+			Temperature:       0.6,
+		},
 	}
 }
 
@@ -125,7 +133,7 @@ func newTestNATSConfig(t *testing.T) config.NATSConfig {
 		AudioChunkCreatedSubject: "audio.chunk.created",
 		AudioObjectStoreBucket:   "AUDIO_FILES",
 		TextStreamName:           "TTS_JOBS",
-		DeadLetterSubject:        "",
+		DeadLetterSubject:        "dead.letter",
 	}
 }
 

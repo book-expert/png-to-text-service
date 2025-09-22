@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/book-expert/logger"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/book-expert/png-to-text-service/internal/augment"
 	"github.com/book-expert/png-to-text-service/internal/config"
@@ -121,6 +123,15 @@ func setupJetStream(_ context.Context, jetstreamContext nats.JetStreamContext, c
 		return fmt.Errorf("failed to create TTS_JOBS stream: %w", err)
 	}
 
+	if cfg.NATS.DeadLetterSubject != "" {
+		dlqName := streamNameForSubject(cfg.NATS.DeadLetterSubject)
+
+		err = createStream(jetstreamContext, dlqName, cfg.NATS.DeadLetterSubject)
+		if err != nil {
+			return fmt.Errorf("failed to create dead letter stream: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -170,68 +181,113 @@ func createStream(jetstreamContext nats.JetStreamContext, streamName, subject st
 	return nil
 }
 
-//nolint:ireturn // Returning nats.ObjectStore is idiomatic for NATS client usage.
-func getPNGObjectStore(
-	_ context.Context,
-	jetstreamContext nats.JetStreamContext,
-	cfg *config.Config,
-) (nats.ObjectStore, error) {
-	pngStore, err := jetstreamContext.ObjectStore(cfg.NATS.PNGObjectStoreBucket)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bind to PNG object store: %w", err)
-	}
-
-	return pngStore, nil
+type objectStoreManager interface {
+	CreateObjectStore(cfg *nats.ObjectStoreConfig) (nats.ObjectStore, error)
+	ObjectStore(bucket string) (nats.ObjectStore, error)
 }
 
-//nolint:ireturn // Returning nats.ObjectStore is idiomatic for NATS client usage.
-func getTextObjectStore(
-	_ context.Context,
-	jetstreamContext nats.JetStreamContext,
-	cfg *config.Config,
-) (nats.ObjectStore, error) {
-	textStore, err := jetstreamContext.ObjectStore(cfg.NATS.TextObjectStoreBucket)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bind to Text object store: %w", err)
-	}
-
-	return textStore, nil
+type jetStreamResources struct {
+	Connection *nats.Conn
+	Context    nats.JetStreamContext
 }
 
-//nolint:ireturn // Returning nats.JetStreamContext is idiomatic for NATS client usage.
-func initNATSConnectionAndJetStream(cfg *config.Config) (*nats.Conn, nats.JetStreamContext, error) {
-	natsConnection, err := nats.Connect(cfg.NATS.URL)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to connect to NATS: %w", err)
+func (resources *jetStreamResources) Close() {
+	if resources == nil {
+		return
 	}
 
-	jetstreamContext, err := natsConnection.JetStream()
-	if err != nil {
+	if resources.Connection != nil {
+		resources.Connection.Close()
+	}
+}
+
+func createJetStreamResources(cfg *config.Config) (*jetStreamResources, error) {
+	natsConnection, connectErr := nats.Connect(cfg.NATS.URL)
+	if connectErr != nil {
+		return nil, fmt.Errorf("failed to connect to NATS: %w", connectErr)
+	}
+
+	jetstreamContext, jetStreamErr := natsConnection.JetStream()
+	if jetStreamErr != nil {
 		natsConnection.Close()
 
-		return nil, nil, fmt.Errorf("failed to get JetStream context: %w", err)
+		return nil, fmt.Errorf("failed to get JetStream context: %w", jetStreamErr)
 	}
 
-	return natsConnection, jetstreamContext, nil
+	return &jetStreamResources{
+		Connection: natsConnection,
+		Context:    jetstreamContext,
+	}, nil
+}
+
+func ensureObjectStore(storeManager objectStoreManager, bucket string) error {
+	storeConfig := new(nats.ObjectStoreConfig)
+	storeConfig.Bucket = bucket
+
+	_, createErr := storeManager.CreateObjectStore(storeConfig)
+	if createErr != nil {
+		if errors.Is(createErr, jetstream.ErrBucketExists) {
+			_, lookupErr := storeManager.ObjectStore(bucket)
+			if lookupErr != nil {
+				return fmt.Errorf("failed to access existing object store '%s': %w", bucket, lookupErr)
+			}
+
+			return nil
+		}
+
+		return fmt.Errorf("failed to create object store '%s': %w", bucket, createErr)
+	}
+
+	return nil
+}
+
+func streamNameForSubject(subject string) string {
+	replacer := strings.NewReplacer(
+		".", "_",
+		"*", "STAR",
+		">", "GT",
+	)
+
+	return strings.ToUpper(replacer.Replace(subject))
 }
 
 func initNATSWorker(
-	ctx context.Context,
 	cfg *config.Config,
 	mainPipeline *pipeline.Pipeline,
 	log *logger.Logger,
 	jetstreamContext nats.JetStreamContext,
 ) (*worker.NatsWorker, error) {
-	// Get PNG object store
-	pngStore, err := getPNGObjectStore(ctx, jetstreamContext, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get PNG object store: %w", err)
+	pngBucket := cfg.NATS.PNGObjectStoreBucket
+
+	ensurePNGStoreErr := ensureObjectStore(jetstreamContext, pngBucket)
+	if ensurePNGStoreErr != nil {
+		return nil, fmt.Errorf("failed to ensure PNG object store '%s': %w", pngBucket, ensurePNGStoreErr)
 	}
 
-	// Get Text object store
-	textStore, err := getTextObjectStore(ctx, jetstreamContext, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get Text object store: %w", err)
+	pngStore, pngStoreErr := jetstreamContext.ObjectStore(pngBucket)
+	if pngStoreErr != nil {
+		return nil, fmt.Errorf("failed to retrieve PNG object store '%s': %w", pngBucket, pngStoreErr)
+	}
+
+	textBucket := cfg.NATS.TextObjectStoreBucket
+
+	ensureTextStoreErr := ensureObjectStore(jetstreamContext, textBucket)
+	if ensureTextStoreErr != nil {
+		return nil, fmt.Errorf("failed to ensure text object store '%s': %w", textBucket, ensureTextStoreErr)
+	}
+
+	textStore, textStoreErr := jetstreamContext.ObjectStore(textBucket)
+	if textStoreErr != nil {
+		return nil, fmt.Errorf("failed to retrieve text object store '%s': %w", textBucket, textStoreErr)
+	}
+
+	ttsDefaults := worker.TTSDefaults{
+		Voice:             cfg.PNGToTextService.TTSDefaults.Voice,
+		Seed:              cfg.PNGToTextService.TTSDefaults.Seed,
+		NGL:               cfg.PNGToTextService.TTSDefaults.NGL,
+		TopP:              cfg.PNGToTextService.TTSDefaults.TopP,
+		RepetitionPenalty: cfg.PNGToTextService.TTSDefaults.RepetitionPenalty,
+		Temperature:       cfg.PNGToTextService.TTSDefaults.Temperature,
 	}
 
 	natsWorker, err := worker.New(
@@ -245,6 +301,7 @@ func initNATSWorker(
 		log,
 		pngStore,
 		textStore, // Pass the new textStore
+		ttsDefaults,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize NATS worker: %w", err)
@@ -265,73 +322,115 @@ func runWorker(ctx context.Context, natsWorker *worker.NatsWorker, log *logger.L
 	}()
 }
 
+func initializeLoggingAndConfig() (*config.Config, *logger.Logger, error) {
+	bootstrapLog, bootstrapErr := setupLogger(os.TempDir())
+	if bootstrapErr != nil {
+		return nil, nil, fmt.Errorf("failed to create bootstrap logger: %w", bootstrapErr)
+	}
+
+	cfg, loadErr := loadConfig(bootstrapLog)
+	if loadErr != nil {
+		bootstrapLog.Error("Failed to load configuration: %v", loadErr)
+
+		closeLoggerQuietly(bootstrapLog)
+
+		return nil, nil, fmt.Errorf("failed to load configuration: %w", loadErr)
+	}
+
+	serviceLog, serviceLogErr := setupLogger(cfg.Paths.BaseLogsDir)
+	if serviceLogErr != nil {
+		closeLoggerQuietly(bootstrapLog)
+
+		return nil, nil, fmt.Errorf("failed to create final logger: %w", serviceLogErr)
+	}
+
+	closeLoggerQuietly(bootstrapLog)
+
+	return cfg, serviceLog, nil
+}
+
+func initializePipeline(cfg *config.Config, serviceLog *logger.Logger) (*pipeline.Pipeline, error) {
+	ocrProcessor := initOCRProcessor(cfg, serviceLog)
+	geminiProcessor := initGeminiProcessor(cfg, serviceLog)
+
+	mainPipeline, pipelineErr := initPipeline(ocrProcessor, geminiProcessor, cfg, serviceLog)
+	if pipelineErr != nil {
+		serviceLog.Error("Failed to initialize processing pipeline: %v", pipelineErr)
+
+		return nil, fmt.Errorf("failed to initialize processing pipeline: %w", pipelineErr)
+	}
+
+	return mainPipeline, nil
+}
+
+func initializeWorker(
+	cfg *config.Config,
+	mainPipeline *pipeline.Pipeline,
+	serviceLog *logger.Logger,
+	jetstreamContext nats.JetStreamContext,
+) (*worker.NatsWorker, error) {
+	natsWorker, workerErr := initNATSWorker(cfg, mainPipeline, serviceLog, jetstreamContext)
+	if workerErr != nil {
+		serviceLog.Error("Failed to initialize NATS worker: %v", workerErr)
+
+		return nil, fmt.Errorf("failed to initialize NATS worker: %w", workerErr)
+	}
+
+	return natsWorker, nil
+}
+
+func closeLoggerQuietly(logInstance *logger.Logger) {
+	if logInstance == nil {
+		return
+	}
+
+	closeErr := logInstance.Close()
+	if closeErr != nil {
+		fmt.Fprintf(os.Stderr, "failed to close logger: %v\n", closeErr)
+	}
+}
+
 func run() error {
-	// A temporary logger for the bootstrap process
-	bootstrapLog, err := setupLogger(os.TempDir())
-	if err != nil {
-		return fmt.Errorf("failed to create bootstrap logger: %w", err)
-	}
-
-	// Load configuration using the central configurator
-	cfg, err := loadConfig(bootstrapLog)
-	if err != nil {
-		bootstrapLog.Error("Failed to load configuration: %v", err)
-
-		return fmt.Errorf("failed to load configuration: %w", err)
-	}
-
-	// Initialize the final logger based on the loaded configuration
-	log, err := setupLogger(cfg.Paths.BaseLogsDir)
-	if err != nil {
-		return fmt.Errorf("failed to create final logger: %w", err)
+	cfg, serviceLog, initializationErr := initializeLoggingAndConfig()
+	if initializationErr != nil {
+		return initializationErr
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	signalChannel := make(chan os.Signal, 1)
+	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM)
 
-	// Initialize NATS connection and JetStream context
-	natsConnection, jetstreamContext, err := initNATSConnectionAndJetStream(cfg)
-	if err != nil {
-		return err
+	jetstreamResources, jetStreamErr := createJetStreamResources(cfg)
+	if jetStreamErr != nil {
+		return jetStreamErr
 	}
-	defer natsConnection.Close()
+	defer jetstreamResources.Close()
 
-	// Setup JetStream streams
-	err = setupJetStream(ctx, jetstreamContext, cfg)
-	if err != nil {
-		return fmt.Errorf("failed to setup JetStream streams: %w", err)
+	setupErr := setupJetStream(ctx, jetstreamResources.Context, cfg)
+	if setupErr != nil {
+		return fmt.Errorf("failed to setup JetStream streams: %w", setupErr)
 	}
 
-	// Initialize OCR processor from configuration
-	ocrProcessor := initOCRProcessor(cfg, log)
-
-	// Initialize Gemini processor from configuration
-	geminiProcessor := initGeminiProcessor(cfg, log)
-
-	mainPipeline, err := initPipeline(ocrProcessor, geminiProcessor, cfg, log)
-	if err != nil {
-		log.Error("Failed to initialize processing pipeline: %v", err)
-
-		return fmt.Errorf("failed to initialize processing pipeline: %w", err)
+	mainPipeline, pipelineErr := initializePipeline(cfg, serviceLog)
+	if pipelineErr != nil {
+		return pipelineErr
 	}
 
-	// Initialize the NATS worker from configuration
-	natsWorker, err := initNATSWorker(ctx, cfg, mainPipeline, log, jetstreamContext)
-	if err != nil {
-		log.Error("Failed to initialize NATS worker: %v", err)
-
-		return fmt.Errorf("failed to initialize NATS worker: %w", err)
+	natsWorker, workerErr := initializeWorker(cfg, mainPipeline, serviceLog, jetstreamResources.Context)
+	if workerErr != nil {
+		return workerErr
 	}
 
-	runWorker(ctx, natsWorker, log)
+	runWorker(ctx, natsWorker, serviceLog)
 
-	<-sigChan
-	log.Info("Shutdown signal received, gracefully shutting down...")
+	<-signalChannel
+	serviceLog.Info("Shutdown signal received, gracefully shutting down...")
 	time.Sleep(ShutdownGracePeriodSeconds * time.Second)
-	log.Info("Shutdown complete.")
+	serviceLog.Info("Shutdown complete.")
+
+	closeLoggerQuietly(serviceLog)
 
 	return nil
 }

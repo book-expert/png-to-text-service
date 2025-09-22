@@ -15,7 +15,7 @@ Core capabilities include:
 -   **NATS Integration**: Seamlessly integrates with NATS for messaging and object storage.
 -   **OCR Processing**: Extracts text from PNG images using Tesseract OCR.
 -   **AI Augmentation**: Optionally augments the extracted text with AI-generated content.
--   **Robust Error Handling**: Implements `ack`, `nak`, and `term` logic for handling NATS messages.
+Robust Error Handling: Implements explicit NATS message acknowledgment (Ack) for successful processing. For pipeline errors, the original message is published to a dead-letter subject and then acknowledged, preventing reprocessing loops.
 
 ## Technology Stack
 

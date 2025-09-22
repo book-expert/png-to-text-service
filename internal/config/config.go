@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/book-expert/configurator"
 	"github.com/book-expert/logger"
@@ -44,6 +45,7 @@ var (
 	ErrAPIKeyVarRequired = errors.New(
 		"gemini.api_key_variable is required when augmentation is enabled",
 	)
+	ErrTTSVoiceRequired = errors.New("png_to_text_service.tts_defaults.voice is required")
 )
 
 // NATSConfig holds all NATS and JetStream settings.
@@ -79,6 +81,7 @@ type PNGToTextServiceConfig struct {
 	Logging      Logging      `toml:"logging"`
 	Augmentation Augmentation `toml:"augmentation"`
 	Prompts      Prompts      `toml:"prompts"`
+	TTSDefaults  TTSDefaults  `toml:"tts_defaults"`
 }
 
 // Config represents the complete, validated configuration for the service.
@@ -137,6 +140,16 @@ type Gemini struct {
 	TopK              int      `toml:"top_k"`
 	TopP              float64  `toml:"top_p"`
 	MaxTokens         int      `toml:"max_tokens"`
+}
+
+// TTSDefaults holds default text-to-speech parameters that will be propagated to downstream services.
+type TTSDefaults struct {
+	Voice             string  `toml:"voice"`
+	Seed              int     `toml:"seed"`
+	NGL               int     `toml:"ngl"`
+	TopP              float64 `toml:"top_p"`
+	RepetitionPenalty float64 `toml:"repetition_penalty"`
+	Temperature       float64 `toml:"temperature"`
 }
 
 // Load reads, validates, and sets defaults for the configuration.
@@ -213,6 +226,10 @@ func (c *Config) validate() error {
 		return ErrAPIKeyVarRequired
 	}
 
+	if strings.TrimSpace(c.PNGToTextService.TTSDefaults.Voice) == "" {
+		return ErrTTSVoiceRequired
+	}
+
 	return nil
 }
 
@@ -253,6 +270,20 @@ func (c *Config) applyDefaults() {
 		defaultGeminiTimeoutSeconds,
 	)
 	setIntDefault(&c.PNGToTextService.Gemini.MaxTokens, defaultGeminiMaxTokens)
+
+	setStringDefault(&c.PNGToTextService.TTSDefaults.Voice, "default")
+
+	if c.PNGToTextService.TTSDefaults.TopP <= 0 {
+		c.PNGToTextService.TTSDefaults.TopP = 0.95
+	}
+
+	if c.PNGToTextService.TTSDefaults.RepetitionPenalty < 1.0 {
+		c.PNGToTextService.TTSDefaults.RepetitionPenalty = 1.0
+	}
+
+	if c.PNGToTextService.TTSDefaults.Temperature <= 0 {
+		c.PNGToTextService.TTSDefaults.Temperature = 0.7
+	}
 }
 
 // setStringDefault sets a default string value if the target field is empty.
