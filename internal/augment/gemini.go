@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/book-expert/events"
 	"github.com/book-expert/logger"
 	"github.com/book-expert/prompt-builder/promptbuilder"
 )
@@ -32,39 +33,46 @@ var (
 	ErrMaxRetries = errors.New("max retries exceeded")
 )
 
-// AugmentationType defines the type of augmentation to perform.
-type AugmentationType string
+// MaxFileSize1MB defines the maximum file size allowed for processing in bytes (1MB).
+const MaxFileSize1MB = 1024 * 1024
 
-const (
-	// AugmentationCommentary indicates that the augmentation should be a commentary.
-	AugmentationCommentary AugmentationType = "commentary"
-	// AugmentationSummary indicates that the augmentation should be a summary.
-	AugmentationSummary AugmentationType = "summary"
+// SummaryPlacement mirrors the canonical placement type shared across services.
+type SummaryPlacement = events.SummaryPlacement
 
-	// MaxFileSize1MB defines the maximum file size allowed for processing in bytes (1MB).
-	MaxFileSize1MB = 1024 * 1024
-)
+// AugmentationCommentaryOptions captures commentary specific behaviour.
+type AugmentationCommentaryOptions struct {
+	Enabled         bool   `json:"enabled"`
+	CustomAdditions string `json:"customAdditions"`
+}
+
+// AugmentationSummaryOptions captures summary specific behaviour.
+type AugmentationSummaryOptions struct {
+	Enabled         bool             `json:"enabled"`
+	Placement       SummaryPlacement `json:"placement"`
+	CustomAdditions string           `json:"customAdditions"`
+}
 
 // AugmentationOptions holds options for text augmentation.
 type AugmentationOptions struct {
-	Parameters   map[string]any   `json:"parameters"`
-	Type         AugmentationType `json:"mode"`
-	CustomPrompt string           `json:"customPrompt"`
+	Parameters map[string]any                `json:"parameters"`
+	Commentary AugmentationCommentaryOptions `json:"commentary"`
+	Summary    AugmentationSummaryOptions    `json:"summary"`
 }
 
 // GeminiConfig holds the configuration for the Gemini API client.
 type GeminiConfig struct {
-	APIKey            string
-	PromptTemplate    string // No longer used by the new builder, but kept for the simple path
-	Models            []string
-	Temperature       float64
-	TimeoutSeconds    int
-	TopK              int
-	TopP              float64
-	MaxTokens         int
-	RetryDelaySeconds int
-	MaxRetries        int
-	UsePromptBuilder  bool
+	APIKey               string
+	CommentaryBasePrompt string
+	SummaryBasePrompt    string
+	Models               []string
+	Temperature          float64
+	TimeoutSeconds       int
+	TopK                 int
+	TopP                 float64
+	MaxTokens            int
+	RetryDelaySeconds    int
+	MaxRetries           int
+	UsePromptBuilder     bool
 }
 
 // GeminiProcessor provides methods for interacting with the Gemini API.
@@ -168,18 +176,10 @@ func (g *GeminiProcessor) buildPromptWithOptions(
 	if g.config.UsePromptBuilder {
 		return g.buildPromptWithBuilder(ocrText, imagePath, opts)
 	}
-	// Fallback to simple string replacement if not using the builder
-	var finalPrompt string
-	if opts != nil && opts.CustomPrompt != "" {
-		finalPrompt = opts.CustomPrompt
-	} else {
-		finalPrompt = g.config.PromptTemplate
-	}
 
-	return strings.ReplaceAll(finalPrompt, "{{.OCRText}}", ocrText), nil
+	return g.buildSimplePrompt(ocrText, opts), nil
 }
 
-// CORRECTED: This function now correctly uses the new, fully-featured prompt builder.
 func (g *GeminiProcessor) buildPromptWithBuilder(
 	ocrText, imagePath string,
 	opts *AugmentationOptions,
@@ -196,38 +196,97 @@ func (g *GeminiProcessor) buildPromptWithBuilder(
 	// 2. Create the builder by passing the FileProcessor.
 	builder := promptbuilder.New(fileProcessor)
 
-	// Add a preset for commentary, as an example.
-	_ = builder.AddSystemPreset(
-		"commentary",
-		"You are an expert code analyst providing commentary.",
-	)
-
-	// 3. Create a BuildRequest struct with all the necessary information.
 	req := &promptbuilder.BuildRequest{
-		Prompt:        ocrText,   // The main text goes into the prompt field.
-		File:          imagePath, // The image path is treated as the file to be included.
-		Task:          "",        // Added missing field
-		SystemMessage: "",        // Added missing field
-		Guidelines:    "",        // Added missing field
-		Image:         "",        // Added missing field
-		OutputFormat:  "",        // Added missing field
+		Prompt:        ocrText,
+		File:          imagePath,
+		SystemMessage: g.composeSystemMessage(opts),
+		Guidelines:    g.composeGuidelines(opts),
 	}
 
-	if opts != nil {
-		req.Task = string(opts.Type) // e.g., "commentary"
-		if opts.CustomPrompt != "" {
-			req.SystemMessage = opts.CustomPrompt
-		}
-	}
-
-	// 4. Call the new BuildPrompt method.
 	result, err := builder.BuildPrompt(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to build prompt: %w", err)
 	}
 
-	// 5. Return the final prompt string from the result.
 	return result.Prompt.String(), nil
+}
+
+func (g *GeminiProcessor) buildSimplePrompt(
+	ocrText string,
+	opts *AugmentationOptions,
+) string {
+	var promptParts []string
+
+	if systemMessage := g.composeSystemMessage(opts); systemMessage != "" {
+		promptParts = append(promptParts, systemMessage)
+	}
+
+	promptParts = append(promptParts, ocrText)
+
+	return strings.Join(promptParts, "\n\n")
+}
+
+func (g *GeminiProcessor) composeSystemMessage(opts *AugmentationOptions) string {
+	if opts == nil {
+		return ""
+	}
+
+	var sections []string
+
+	if opts.Commentary.Enabled {
+		commentary := strings.TrimSpace(g.config.CommentaryBasePrompt)
+		if addition := strings.TrimSpace(opts.Commentary.CustomAdditions); addition != "" {
+			commentary = fmt.Sprintf("%s\n\nAdditional commentary guidance:\n%s", commentary, addition)
+		}
+
+		sections = append(sections, commentary)
+	}
+
+	if opts.Summary.Enabled {
+		summary := strings.TrimSpace(g.config.SummaryBasePrompt)
+		placement := g.summaryPlacementDirective(opts.Summary.Placement)
+		summary = fmt.Sprintf("%s\n\nPlacement guidance: %s.", summary, placement)
+		if addition := strings.TrimSpace(opts.Summary.CustomAdditions); addition != "" {
+			summary = fmt.Sprintf("%s\n\nAdditional summary guidance:\n%s", summary, addition)
+		}
+
+		sections = append(sections, summary)
+	}
+
+	return strings.Join(sections, "\n\n---\n\n")
+}
+
+func (g *GeminiProcessor) composeGuidelines(opts *AugmentationOptions) string {
+	if opts == nil {
+		return ""
+	}
+
+	var guidelines []string
+
+	if opts.Commentary.Enabled {
+		guidelines = append(guidelines, "Maintain the original OCR prose verbatim; only add descriptive commentary where the visuals appear.")
+	}
+
+	if opts.Summary.Enabled {
+		direction := "after the narration-ready OCR text"
+		if opts.Summary.Placement == events.SummaryPlacementTop {
+			direction = "before the narration-ready OCR text"
+		}
+		guidelines = append(guidelines, fmt.Sprintf("Provide a concise summary %s.", direction))
+	}
+
+	return strings.Join(guidelines, "\n")
+}
+
+func (g *GeminiProcessor) summaryPlacementDirective(placement SummaryPlacement) string {
+	switch placement {
+	case events.SummaryPlacementTop:
+		return "Insert the summary before the narration-ready OCR text so listeners hear the overview first"
+	case events.SummaryPlacementBottom:
+		fallthrough
+	default:
+		return "Insert the summary after the narration-ready OCR text as a closing recap"
+	}
 }
 
 func (g *GeminiProcessor) validateInputs(_, imagePath string) error {

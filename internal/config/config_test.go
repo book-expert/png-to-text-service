@@ -87,13 +87,23 @@ func newTestPNGToTextServiceConfig(t *testing.T, tmpDir, apiKeyEnvName string) c
 			MaxTokens:         2048,
 		},
 		Prompts: config.Prompts{
-			Augmentation: "Test prompt",
+			CommentaryBase: "Base commentary",
+			SummaryBase:    "Base summary",
 		},
 		Augmentation: config.Augmentation{
-			Type:             "commentary",
-			CustomPrompt:     "",
 			UsePromptBuilder: true,
 			Parameters:       map[string]any{},
+			Defaults: config.AugmentationDefaults{
+				Commentary: config.AugmentationCommentaryDefaults{
+					Enabled:         true,
+					CustomAdditions: "",
+				},
+				Summary: config.AugmentationSummaryDefaults{
+					Enabled:         true,
+					Placement:       config.SummaryPlacementTop,
+					CustomAdditions: "",
+				},
+			},
 		},
 		Tesseract: config.Tesseract{
 			Language:       "eng",
@@ -180,6 +190,33 @@ name = "test"`
 	require.NotNil(t, cfg)
 	assert.Equal(t, "info", cfg.PNGToTextService.Logging.Level)
 	assert.Equal(t, 3, cfg.PNGToTextService.Tesseract.OEM)
+}
+
+// TestLoad_DefaultSummaryPlacement verifies that the default summary placement is applied when omitted.
+func TestLoad_DefaultSummaryPlacement(t *testing.T) {
+	log := newTestLogger(t)
+
+	configContent := `
+[project]
+name = "test"
+
+[png_to_text_service.augmentation.defaults.summary]
+enabled = true
+
+[png_to_text_service.tts_defaults]
+voice = "default"
+`
+	configPath := createTempConfigFile(t, configContent)
+
+	url, cleanup := startTestServer(t, configPath)
+	t.Cleanup(cleanup)
+	t.Setenv("PROJECT_TOML", url)
+
+	cfg, loadErr := config.Load("", log)
+
+	require.NoError(t, loadErr)
+	require.NotNil(t, cfg)
+	assert.Equal(t, config.SummaryPlacementBottom, cfg.PNGToTextService.Augmentation.Defaults.Summary.Placement)
 }
 
 // TestLoad_URLNotSet tests that Load returns an error if the PROJECT_TOML env var is not

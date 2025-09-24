@@ -2,17 +2,19 @@
 package worker
 
 import (
-	"bytes" // New import
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/book-expert/events"
 	"github.com/book-expert/logger"
-	"github.com/google/uuid" // New import
+	"github.com/book-expert/png-to-text-service/internal/augment"
+	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 )
 
@@ -27,7 +29,7 @@ const (
 
 // Pipeline defines the interface for the processing logic.
 type Pipeline interface {
-	Process(ctx context.Context, objectID string, data []byte) (string, error)
+	Process(ctx context.Context, objectID string, data []byte, overrides *augment.AugmentationOptions) (string, error)
 }
 
 // TTSDefaults holds default parameters for downstream text-to-speech processing.
@@ -202,7 +204,8 @@ func (w *NatsWorker) processAndPublishText(
 		return "", readErr
 	}
 
-	processedText, processErr := w.pipeline.Process(ctx, event.PNGKey, pngBytes)
+	options := buildAugmentationOptions(event.Augmentation)
+	processedText, processErr := w.pipeline.Process(ctx, event.PNGKey, pngBytes, options)
 	if processErr != nil {
 		return "", fmt.Errorf("pipeline failed for '%s': %w", event.PNGKey, processErr)
 	}
@@ -303,6 +306,41 @@ func (w *NatsWorker) publishTextProcessedEvent(event *events.PNGCreatedEvent, te
 	}
 
 	return nil
+}
+
+func buildAugmentationOptions(
+	prefs *events.AugmentationPreferences,
+) *augment.AugmentationOptions {
+	if prefs == nil {
+		return nil
+	}
+
+	commentaryInstructions := strings.TrimSpace(prefs.Commentary.CustomInstructions)
+	summaryInstructions := strings.TrimSpace(prefs.Summary.CustomInstructions)
+
+	placement := sanitizeSummaryPlacement(prefs.Summary.Placement)
+
+	return &augment.AugmentationOptions{
+		Commentary: augment.AugmentationCommentaryOptions{
+			Enabled:         prefs.Commentary.Enabled,
+			CustomAdditions: commentaryInstructions,
+		},
+		Summary: augment.AugmentationSummaryOptions{
+			Enabled:         prefs.Summary.Enabled,
+			Placement:       placement,
+			CustomAdditions: summaryInstructions,
+		},
+	}
+}
+
+func sanitizeSummaryPlacement(placement events.SummaryPlacement) augment.SummaryPlacement {
+	switch placement {
+	case events.SummaryPlacementTop,
+		events.SummaryPlacementBottom:
+		return augment.SummaryPlacement(placement)
+	default:
+		return augment.SummaryPlacement(events.SummaryPlacementBottom)
+	}
 }
 
 func (w *NatsWorker) checkMessageMetadata(msg *nats.Msg) error {

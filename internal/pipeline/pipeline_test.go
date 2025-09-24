@@ -69,10 +69,16 @@ func TestPipeline_Process_Success(t *testing.T) {
 			_ context.Context,
 			_ string,
 			_ string,
-			_ *augment.AugmentationOptions,
+			opts *augment.AugmentationOptions,
 		) (string, error) {
+			if opts == nil || !opts.Commentary.Enabled {
+				t.Fatalf("expected commentary augmentation to be enabled")
+			}
 			return "augmented text", nil
 		},
+	}
+	defaultOptions := &augment.AugmentationOptions{
+		Commentary: augment.AugmentationCommentaryOptions{Enabled: true},
 	}
 
 	testPipeline, err := pipeline.New(
@@ -81,11 +87,11 @@ func TestPipeline_Process_Success(t *testing.T) {
 		log,
 		false,
 		5,
-		&augment.AugmentationOptions{Parameters: nil, Type: "", CustomPrompt: ""},
+		defaultOptions,
 	)
 	require.NoError(t, err)
 
-	result, err := testPipeline.Process(context.Background(), "test-id", []byte("png data"))
+	result, err := testPipeline.Process(context.Background(), "test-id", []byte("png data"), nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, "augmented text", result)
@@ -100,6 +106,9 @@ func TestPipeline_Process_OCR_Error(t *testing.T) {
 		},
 	}
 	augmenter := &mockAugmenter{AugmentTextWithOptionsFunc: nil}
+	defaultOptions := &augment.AugmentationOptions{
+		Commentary: augment.AugmentationCommentaryOptions{Enabled: true},
+	}
 
 	testPipeline, err := pipeline.New(
 		ocr,
@@ -107,11 +116,11 @@ func TestPipeline_Process_OCR_Error(t *testing.T) {
 		log,
 		false,
 		10,
-		&augment.AugmentationOptions{Parameters: nil, Type: "", CustomPrompt: ""},
+		defaultOptions,
 	)
 	require.NoError(t, err)
 
-	_, err = testPipeline.Process(context.Background(), "test-id", []byte("png data"))
+	_, err = testPipeline.Process(context.Background(), "test-id", []byte("png data"), nil)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "OCR processing: mock ocr error: ocr error")
@@ -130,10 +139,16 @@ func TestPipeline_Process_Augment_Error(t *testing.T) {
 			_ context.Context,
 			_ string,
 			_ string,
-			_ *augment.AugmentationOptions,
+			opts *augment.AugmentationOptions,
 		) (string, error) {
+			if opts == nil || !opts.Commentary.Enabled {
+				t.Fatalf("expected commentary enabled for augment error test")
+			}
 			return "", fmt.Errorf("mock augment error: %w", errAugmentError)
 		},
+	}
+	defaultOptions := &augment.AugmentationOptions{
+		Commentary: augment.AugmentationCommentaryOptions{Enabled: true},
 	}
 
 	testPipeline, err := pipeline.New(
@@ -142,11 +157,11 @@ func TestPipeline_Process_Augment_Error(t *testing.T) {
 		log,
 		false,
 		5,
-		&augment.AugmentationOptions{Parameters: nil, Type: "", CustomPrompt: ""},
+		defaultOptions,
 	)
 	require.NoError(t, err)
 
-	result, err := testPipeline.Process(context.Background(), "test-id", []byte("png data"))
+	result, err := testPipeline.Process(context.Background(), "test-id", []byte("png data"), nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, "ocr text", result)
@@ -161,6 +176,9 @@ func TestPipeline_Process_ShortText(t *testing.T) {
 		},
 	}
 	augmenter := &mockAugmenter{AugmentTextWithOptionsFunc: nil}
+	defaultOptions := &augment.AugmentationOptions{
+		Commentary: augment.AugmentationCommentaryOptions{Enabled: true},
+	}
 
 	testPipeline, err := pipeline.New(
 		ocr,
@@ -168,12 +186,55 @@ func TestPipeline_Process_ShortText(t *testing.T) {
 		log,
 		false,
 		10,
-		&augment.AugmentationOptions{Parameters: nil, Type: "", CustomPrompt: ""},
+		defaultOptions,
 	)
 	require.NoError(t, err)
 
-	result, err := testPipeline.Process(context.Background(), "test-id", []byte("png data"))
+	result, err := testPipeline.Process(context.Background(), "test-id", []byte("png data"), nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, "short", result)
+}
+
+func TestPipeline_Process_DisabledOverrides(t *testing.T) {
+	t.Parallel()
+	log := newTestLogger(t)
+	ocr := &mockOCRProcessor{
+		ProcessPNGFunc: func(_ context.Context, _ string) (string, error) {
+			return "ocr text", nil
+		},
+	}
+	augmenter := &mockAugmenter{
+		AugmentTextWithOptionsFunc: func(
+			_ context.Context,
+			_ string,
+			_ string,
+			_ *augment.AugmentationOptions,
+		) (string, error) {
+			t.Fatalf("augmentation should be skipped when overrides disable it")
+			return "", nil
+		},
+	}
+	defaultOptions := &augment.AugmentationOptions{
+		Commentary: augment.AugmentationCommentaryOptions{Enabled: true},
+	}
+
+	testPipeline, err := pipeline.New(
+		ocr,
+		augmenter,
+		log,
+		false,
+		5,
+		defaultOptions,
+	)
+	require.NoError(t, err)
+
+	overrides := &augment.AugmentationOptions{
+		Commentary: augment.AugmentationCommentaryOptions{Enabled: false},
+		Summary:    augment.AugmentationSummaryOptions{Enabled: false},
+	}
+
+	result, err := testPipeline.Process(context.Background(), "test-id", []byte("png data"), overrides)
+	require.NoError(t, err)
+	assert.Equal(t, "ocr text", result)
 }

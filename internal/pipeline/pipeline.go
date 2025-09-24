@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/book-expert/logger"
 
@@ -31,13 +32,13 @@ type Augmenter interface {
 
 // Pipeline orchestrates the multi-step process of converting a PNG to augmented text.
 type Pipeline struct {
-	ocr              OCRProcessor
-	augmenter        Augmenter
-	logger           *logger.Logger
-	localTmpDir      string
-	keepTempFiles    bool
-	minTextLength    int
-	augmentationOpts *augment.AugmentationOptions
+	ocr                 OCRProcessor
+	augmenter           Augmenter
+	logger              *logger.Logger
+	localTmpDir         string
+	keepTempFiles       bool
+	minTextLength       int
+	defaultAugmentation *augment.AugmentationOptions
 }
 
 // New creates a new pipeline with all its dependencies.
@@ -61,22 +62,22 @@ func New(
 	}
 
 	return &Pipeline{
-		ocr:              ocr,
-		augmenter:        augmenter,
-		logger:           log,
-		localTmpDir:      localTmpDir,
-		keepTempFiles:    keepTempFiles,
-		minTextLength:    minTextLength,
-		augmentationOpts: augOpts,
+		ocr:                 ocr,
+		augmenter:           augmenter,
+		logger:              log,
+		localTmpDir:         localTmpDir,
+		keepTempFiles:       keepTempFiles,
+		minTextLength:       minTextLength,
+		defaultAugmentation: cloneAugmentationOptions(augOpts),
 	}, nil
 }
 
 // Process handles the full workflow for a single object.
-// MODIFIED: It now accepts the raw pngData directly.
 func (p *Pipeline) Process(
 	ctx context.Context,
 	objectID string,
 	pngData []byte,
+	overrides *augment.AugmentationOptions,
 ) (string, error) {
 	p.logger.Info("Processing job for object: %s", objectID)
 
@@ -116,19 +117,114 @@ func (p *Pipeline) Process(
 			len(cleanedText),
 		)
 	} else {
-		p.logger.Info("Augmenting text for %s", objectID)
+		effectiveOptions := p.mergeAugmentationOptions(overrides)
 
-		augmentedText, err := p.augmenter.AugmentTextWithOptions(ctx, cleanedText, tmpFileName, p.augmentationOpts)
-		if err != nil {
-			p.logger.Warn("Text augmentation failed for %s: %v. Using cleaned OCR text as fallback.", objectID, err)
+		if effectiveOptions.Commentary.Enabled || effectiveOptions.Summary.Enabled {
+			p.logger.Info("Augmenting text for %s", objectID)
+
+			augmentedText, err := p.augmenter.AugmentTextWithOptions(ctx, cleanedText, tmpFileName, effectiveOptions)
+			if err != nil {
+				p.logger.Warn("Text augmentation failed for %s: %v. Using cleaned OCR text as fallback.", objectID, err)
+			} else {
+				cleanedText = augmentedText
+			}
 		} else {
-			cleanedText = augmentedText
+			p.logger.Info("Augmentation disabled for %s; returning OCR text.", objectID)
 		}
 	}
 
 	p.logger.Info("Successfully processed object %s", objectID)
 
 	return cleanedText, nil
+}
+
+func (p *Pipeline) mergeAugmentationOptions(
+	overrides *augment.AugmentationOptions,
+) *augment.AugmentationOptions {
+	base := cloneAugmentationOptions(p.defaultAugmentation)
+	if base == nil {
+		base = &augment.AugmentationOptions{}
+	}
+
+	if overrides == nil {
+		return base
+	}
+
+	if overrides.Parameters != nil {
+		base.Parameters = mergeParameterMaps(base.Parameters, overrides.Parameters)
+	}
+
+	base.Commentary.Enabled = overrides.Commentary.Enabled
+	if addition := strings.TrimSpace(overrides.Commentary.CustomAdditions); addition != "" {
+		base.Commentary.CustomAdditions = appendInstruction(base.Commentary.CustomAdditions, addition)
+	}
+
+	base.Summary.Enabled = overrides.Summary.Enabled
+	if overrides.Summary.Placement != "" {
+		base.Summary.Placement = overrides.Summary.Placement
+	}
+	if addition := strings.TrimSpace(overrides.Summary.CustomAdditions); addition != "" {
+		base.Summary.CustomAdditions = appendInstruction(base.Summary.CustomAdditions, addition)
+	}
+
+	return base
+}
+
+func cloneAugmentationOptions(src *augment.AugmentationOptions) *augment.AugmentationOptions {
+	if src == nil {
+		return nil
+	}
+
+	clone := &augment.AugmentationOptions{
+		Parameters: cloneParameterMap(src.Parameters),
+		Commentary: src.Commentary,
+		Summary:    src.Summary,
+	}
+
+	return clone
+}
+
+func cloneParameterMap(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+
+	clone := make(map[string]any, len(src))
+	for key, value := range src {
+		clone[key] = value
+	}
+
+	return clone
+}
+
+func mergeParameterMaps(
+	defaults map[string]any,
+	overrides map[string]any,
+) map[string]any {
+	result := cloneParameterMap(defaults)
+	if result == nil {
+		result = make(map[string]any, len(overrides))
+	}
+
+	for key, value := range overrides {
+		result[key] = value
+	}
+
+	return result
+}
+
+func appendInstruction(base, addition string) string {
+	base = strings.TrimSpace(base)
+	addition = strings.TrimSpace(addition)
+
+	switch {
+	case base == "":
+		return addition
+	case addition == "":
+		return base
+	default:
+		return base + "\n\n" + addition
+	}
 }
 
 func (p *Pipeline) createTempFile(data []byte) (*os.File, error) {

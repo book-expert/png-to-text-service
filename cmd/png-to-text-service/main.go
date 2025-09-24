@@ -29,6 +29,19 @@ const (
 	ShutdownGracePeriodSeconds = 2
 )
 
+func cloneParameterMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+
+	clone := make(map[string]any, len(src))
+	for key, value := range src {
+		clone[key] = value
+	}
+
+	return clone
+}
+
 func setupLogger(logPath string) (*logger.Logger, error) {
 	log, err := logger.New(logPath, "png-to-text-bootstrap.log")
 	if err != nil {
@@ -69,17 +82,18 @@ func initGeminiProcessor(cfg *config.Config, log *logger.Logger) *augment.Gemini
 	}
 
 	geminiCfg := &augment.GeminiConfig{
-		APIKey:            geminiAPIKey,
-		PromptTemplate:    cfg.PNGToTextService.Prompts.Augmentation,
-		Models:            cfg.PNGToTextService.Gemini.Models,
-		Temperature:       cfg.PNGToTextService.Gemini.Temperature,
-		TimeoutSeconds:    cfg.PNGToTextService.Gemini.TimeoutSeconds,
-		MaxRetries:        cfg.PNGToTextService.Gemini.MaxRetries,
-		UsePromptBuilder:  cfg.PNGToTextService.Augmentation.UsePromptBuilder,
-		TopK:              cfg.PNGToTextService.Gemini.TopK,
-		TopP:              cfg.PNGToTextService.Gemini.TopP,
-		MaxTokens:         cfg.PNGToTextService.Gemini.MaxTokens,
-		RetryDelaySeconds: cfg.PNGToTextService.Gemini.RetryDelaySeconds,
+		APIKey:               geminiAPIKey,
+		CommentaryBasePrompt: cfg.PNGToTextService.Prompts.CommentaryBase,
+		SummaryBasePrompt:    cfg.PNGToTextService.Prompts.SummaryBase,
+		Models:               cfg.PNGToTextService.Gemini.Models,
+		Temperature:          cfg.PNGToTextService.Gemini.Temperature,
+		TimeoutSeconds:       cfg.PNGToTextService.Gemini.TimeoutSeconds,
+		MaxRetries:           cfg.PNGToTextService.Gemini.MaxRetries,
+		UsePromptBuilder:     cfg.PNGToTextService.Augmentation.UsePromptBuilder,
+		TopK:                 cfg.PNGToTextService.Gemini.TopK,
+		TopP:                 cfg.PNGToTextService.Gemini.TopP,
+		MaxTokens:            cfg.PNGToTextService.Gemini.MaxTokens,
+		RetryDelaySeconds:    cfg.PNGToTextService.Gemini.RetryDelaySeconds,
 	}
 
 	return augment.NewGeminiProcessor(geminiCfg, log)
@@ -91,19 +105,26 @@ func initPipeline(
 	cfg *config.Config,
 	log *logger.Logger,
 ) (*pipeline.Pipeline, error) {
+	defaultOptions := &augment.AugmentationOptions{
+		Parameters: cloneParameterMap(cfg.PNGToTextService.Augmentation.Parameters),
+		Commentary: augment.AugmentationCommentaryOptions{
+			Enabled:         cfg.PNGToTextService.Augmentation.Defaults.Commentary.Enabled,
+			CustomAdditions: strings.TrimSpace(cfg.PNGToTextService.Augmentation.Defaults.Commentary.CustomAdditions),
+		},
+		Summary: augment.AugmentationSummaryOptions{
+			Enabled:         cfg.PNGToTextService.Augmentation.Defaults.Summary.Enabled,
+			Placement:       augment.SummaryPlacement(cfg.PNGToTextService.Augmentation.Defaults.Summary.Placement),
+			CustomAdditions: strings.TrimSpace(cfg.PNGToTextService.Augmentation.Defaults.Summary.CustomAdditions),
+		},
+	}
+
 	mainPipeline, err := pipeline.New(
 		ocrProcessor,
 		geminiProcessor,
 		log,
 		false,         // keepTempFiles is a debug-only setting.
 		MinTextLength, // minTextLength
-		&augment.AugmentationOptions{
-			Parameters: cfg.PNGToTextService.Augmentation.Parameters,
-			Type: augment.AugmentationType(
-				cfg.PNGToTextService.Augmentation.Type,
-			),
-			CustomPrompt: cfg.PNGToTextService.Augmentation.CustomPrompt,
-		},
+		defaultOptions,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize processing pipeline: %w", err)

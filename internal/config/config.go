@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/book-expert/configurator"
+	"github.com/book-expert/events"
 	"github.com/book-expert/logger"
 )
 
@@ -101,16 +102,47 @@ type Project struct {
 
 // Prompts contains AI prompts used for augmentation.
 type Prompts struct {
-	Augmentation string `toml:"augmentation"`
+	CommentaryBase string `toml:"commentary_base"`
+	SummaryBase    string `toml:"summary_base"`
 }
 
 // Augmentation defines settings for AI text augmentation.
 type Augmentation struct {
-	Type             string         `toml:"type"`
-	CustomPrompt     string         `toml:"custom_prompt"`
-	UsePromptBuilder bool           `toml:"use_prompt_builder"`
-	Parameters       map[string]any `toml:"parameters"`
+	UsePromptBuilder bool                 `toml:"use_prompt_builder"`
+	Parameters       map[string]any       `toml:"parameters"`
+	Defaults         AugmentationDefaults `toml:"defaults"`
 }
+
+// AugmentationDefaults captures the default augmentation behaviour when a workflow
+// does not override preferences.
+type AugmentationDefaults struct {
+	Commentary AugmentationCommentaryDefaults `toml:"commentary"`
+	Summary    AugmentationSummaryDefaults    `toml:"summary"`
+}
+
+// AugmentationCommentaryDefaults defines commentary fallback behaviour.
+type AugmentationCommentaryDefaults struct {
+	Enabled         bool   `toml:"enabled"`
+	CustomAdditions string `toml:"custom_additions"`
+}
+
+// AugmentationSummaryDefaults defines summary fallback behaviour.
+type AugmentationSummaryDefaults struct {
+	Enabled         bool                    `toml:"enabled"`
+	Placement       events.SummaryPlacement `toml:"placement"`
+	CustomAdditions string                  `toml:"custom_additions"`
+}
+
+// SummaryPlacement mirrors events.SummaryPlacement to expose meaningful constants to
+// configuration consumers without requiring them to import the events package.
+type SummaryPlacement = events.SummaryPlacement
+
+const (
+	// SummaryPlacementTop places summaries before the OCR text.
+	SummaryPlacementTop SummaryPlacement = events.SummaryPlacementTop
+	// SummaryPlacementBottom places summaries after the OCR text.
+	SummaryPlacementBottom SummaryPlacement = events.SummaryPlacementBottom
+)
 
 // Logging defines the configuration for logging.
 type Logging struct {
@@ -246,7 +278,10 @@ func (c *Config) applyDefaults() {
 	)
 
 	// Augmentation defaults
-	setStringDefault(&c.PNGToTextService.Augmentation.Type, "commentary")
+	// Ensure defaults exist for augmentation selections.
+	if c.PNGToTextService.Augmentation.Defaults.Summary.Placement == "" {
+		c.PNGToTextService.Augmentation.Defaults.Summary.Placement = SummaryPlacementBottom
+	}
 
 	// Logging defaults
 	setStringDefault(&c.PNGToTextService.Logging.Level, "info")
