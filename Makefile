@@ -9,7 +9,8 @@ all: check build test
 # Build the application
 build:
 	@echo "Building png-to-text-service..."
-	@go build -o bin/png-to-text-service ./cmd/png-to-text-service
+	@mkdir -p ~/bin
+	@go build -o ~/bin/png-to-text-service ./cmd/png-to-text-service
 
 # Install dependencies
 deps:
