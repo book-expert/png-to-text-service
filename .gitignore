@@ -5,3 +5,11 @@
 /.git/
 /test_artifacts/
 /logs/
+.gocache/
+.gomodcache/
+*.log
+*.tmp
+.DS_Store
+.vscode/
+dist/
+build/
