@@ -41,73 +41,15 @@ Core flow:
 - `make build` (binary at `~/bin/png-to-text-service`)
 
 ### Configuration
-Set `PROJECT_TOML` to a file path or HTTP URL serving your TOML config. Minimal example:
+Configuration is provided centrally via the configurator application. Do not craft ad‑hoc project files for this service. Instead:
+- Set `PROJECT_TOML` to the canonical project configuration URL or path managed by configurator.
+- The schema consumed by this service is defined by its config types and the configurator ServiceNATSConfig.
+- Key references for fields expected by this service:
+  - Service config container: `internal/config/config.go:68`
+  - PNG‑to‑text section: `internal/config/config.go:57`
+  - Config loading path (uses `PROJECT_TOML`): `internal/config/config.go:170`
 
-```toml
-[png-to-text-service]
-[png-to-text-service.nats]
-url = "nats://127.0.0.1:4222"
-
-[[png-to-text-service.object_stores]]
-bucket_name = "png-files"
-
-[[png-to-text-service.object_stores]]
-bucket_name = "text-files"
-
-[[png-to-text-service.streams]]
-name = "pngs"
-subjects = ["book-expert.pngs.created"]
-
-[[png-to-text-service.streams]]
-name = "texts"
-subjects = ["book-expert.texts.created"]
-
-[[png-to-text-service.consumers]]
-stream_name = "pngs"
-consumer_name = "png-to-text-consumer"
-filter_subject = "book-expert.pngs.created"
-
-[png_to_text_service.gemini]
-api_key_variable = "GEMINI_API_KEY"
-models = ["gemini-1.5-flash"]
-max_retries = 3
-retry_delay_seconds = 5
-timeout_seconds = 60
-temperature = 0.5
-top_k = 40
-top_p = 0.9
-max_tokens = 2048
-
-[png_to_text_service.augmentation]
-use_prompt_builder = true
-
-[png_to_text_service.augmentation.defaults.commentary]
-enabled = true
-custom_additions = ""
-
-[png_to_text_service.augmentation.defaults.summary]
-enabled = false
-placement = "bottom"
-custom_additions = ""
-
-[png_to_text_service.tesseract]
-language = "eng"
-oem = 3
-psm = 3
-dpi = 300
-timeout_seconds = 60
-
-[png_to_text_service.tts_defaults]
-voice = "default"
-seed = 0
-ngl = 4
-top_p = 0.9
-repetition_penalty = 1.05
-temperature = 0.6
-```
-
-Also export your Gemini API key as named by `api_key_variable` (example:)
-- `export GEMINI_API_KEY=your_secret_key`
+Ensure your central configuration provides the required NATS streams/consumers/object stores and the `png_to_text_service` settings (Gemini, augmentation defaults, Tesseract, and TTS defaults) per your environment. The configurator repository is the source of truth for structure and validations.
 
 ## Usage
 Run the service:
