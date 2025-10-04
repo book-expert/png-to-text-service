@@ -36,10 +36,8 @@ var (
 	ErrConsumersCount       = errors.New("invalid configuration: expected at least 1 consumer")
 	ErrStreamsCount         = errors.New("invalid configuration: expected at least 2 streams (input and output)")
 	ErrOutputStreamSubjects = errors.New("invalid configuration: output stream must have at least 1 subject")
-	ErrDLQNoSubjects        = errors.New("dlq stream is configured without subjects")
-	ErrDLQNotFound          = errors.New(
-		"dead-letter subject not found: configure a 'dlq' stream with at least one subject",
-	)
+	// ErrDeadLetterSubjectEmpty indicates the DLQ subject is missing from service config.
+	ErrDeadLetterSubjectEmpty = errors.New("dead letter subject must be configured")
 )
 
 const (
@@ -225,20 +223,20 @@ func initNATSWorker(
 		return nil, validateConfigError
 	}
 
-    stores, resolveStoresError := resolveObjectStores(requestContext, jetstreamContext, cfg)
-    if resolveStoresError != nil {
-        return nil, resolveStoresError
-    }
+	stores, resolveStoresError := resolveObjectStores(requestContext, jetstreamContext, cfg)
+	if resolveStoresError != nil {
+		return nil, resolveStoresError
+	}
 
-    pngStore := stores.png
-    textStore := stores.text
+	pngStore := stores.png
+	textStore := stores.text
 
-    ttsDefaults := makeTTSDefaults(cfg)
+	ttsDefaults := makeTTSDefaults(cfg)
 
-	// Determine the DLQ subject from configured streams (must exist per blueprint)
-	dlqSubject, findDLQError := findDLQSubject(cfg)
-	if findDLQError != nil {
-		return nil, findDLQError
+	// Resolve the DLQ subject from service configuration (explicit per blueprint)
+	dlqSubject := strings.TrimSpace(cfg.PNGToTextService.DeadLetterSubject)
+	if dlqSubject == "" {
+		return nil, ErrDeadLetterSubjectEmpty
 	}
 
 	natsWorker, newWorkerError := worker.New(
@@ -283,73 +281,58 @@ func validateNATSConfigCounts(cfg *config.Config) error {
 	return nil
 }
 
-// findDLQSubject returns the first subject of a stream designated for dead-lettering.
-// The selection prefers a stream named "dlq" (case-insensitive). If not found,
-// it falls back to any stream whose name or subject contains ".dlq".
-func findDLQSubject(cfg *config.Config) (string, error) {
-	if subject, ok := findDLQSubjectExact(cfg); ok {
-		return subject, nil
-	}
-
-	if subject, ok := findDLQSubjectHeuristic(cfg); ok {
-		return subject, nil
-	}
-
-	return "", fmt.Errorf("%w", ErrDLQNotFound)
-}
-
 // resolveObjectStores ensures both source and destination object stores exist and returns handles.
 type resolvedStores struct {
-    png  jetstream.ObjectStore
-    text jetstream.ObjectStore
+	png  jetstream.ObjectStore
+	text jetstream.ObjectStore
 }
 
 func resolveObjectStores(
-    requestContext context.Context,
-    jetstreamContext jetstream.JetStream,
-    cfg *config.Config,
+	requestContext context.Context,
+	jetstreamContext jetstream.JetStream,
+	cfg *config.Config,
 ) (resolvedStores, error) {
 	pngBucketName := cfg.ServiceNATS.ObjectStores[0].BucketName
 
 	ensurePNGStoreError := ensureObjectStore(requestContext, jetstreamContext, pngBucketName)
-    if ensurePNGStoreError != nil {
-        return resolvedStores{}, fmt.Errorf(
-            "failed to ensure PNG object store '%s': %w",
-            pngBucketName,
-            ensurePNGStoreError,
-        )
-    }
+	if ensurePNGStoreError != nil {
+		return resolvedStores{}, fmt.Errorf(
+			"failed to ensure PNG object store '%s': %w",
+			pngBucketName,
+			ensurePNGStoreError,
+		)
+	}
 
 	pngStore, pngStoreLookupError := jetstreamContext.ObjectStore(requestContext, pngBucketName)
-    if pngStoreLookupError != nil {
-        return resolvedStores{}, fmt.Errorf(
-            "failed to retrieve PNG object store '%s': %w",
-            pngBucketName,
-            pngStoreLookupError,
-        )
-    }
+	if pngStoreLookupError != nil {
+		return resolvedStores{}, fmt.Errorf(
+			"failed to retrieve PNG object store '%s': %w",
+			pngBucketName,
+			pngStoreLookupError,
+		)
+	}
 
 	textBucketName := cfg.ServiceNATS.ObjectStores[1].BucketName
 
 	ensureTextStoreError := ensureObjectStore(requestContext, jetstreamContext, textBucketName)
-    if ensureTextStoreError != nil {
-        return resolvedStores{}, fmt.Errorf(
-            "failed to ensure text object store '%s': %w",
-            textBucketName,
-            ensureTextStoreError,
-        )
-    }
+	if ensureTextStoreError != nil {
+		return resolvedStores{}, fmt.Errorf(
+			"failed to ensure text object store '%s': %w",
+			textBucketName,
+			ensureTextStoreError,
+		)
+	}
 
 	textStore, textStoreLookupError := jetstreamContext.ObjectStore(requestContext, textBucketName)
-    if textStoreLookupError != nil {
-        return resolvedStores{}, fmt.Errorf(
-            "failed to retrieve text object store '%s': %w",
-            textBucketName,
-            textStoreLookupError,
-        )
-    }
+	if textStoreLookupError != nil {
+		return resolvedStores{}, fmt.Errorf(
+			"failed to retrieve text object store '%s': %w",
+			textBucketName,
+			textStoreLookupError,
+		)
+	}
 
-    return resolvedStores{png: pngStore, text: textStore}, nil
+	return resolvedStores{png: pngStore, text: textStore}, nil
 }
 
 // makeTTSDefaults constructs TTS default parameters from configuration.
@@ -364,36 +347,39 @@ func makeTTSDefaults(cfg *config.Config) worker.TTSDefaults {
 	}
 }
 
-func findDLQSubjectExact(cfg *config.Config) (string, bool) {
-	for _, stream := range cfg.ServiceNATS.Streams {
-		if strings.EqualFold(strings.TrimSpace(stream.Name), "dlq") {
-			if len(stream.Subjects) > 0 && strings.TrimSpace(stream.Subjects[0]) != "" {
-				return stream.Subjects[0], true
-			}
-
-			return "", false
-		}
+// ensureDLQStream verifies that a stream covers the provided DLQ subject; if none does,
+// it creates/updates a dedicated DLQ stream via configurator. No-op when subject is empty.
+func ensureDLQStream(
+	requestContext context.Context,
+	jetstreamContext jetstream.JetStream,
+	serviceNATS *configurator.ServiceNATSConfig,
+	deadLetterSubject string,
+) error {
+	if deadLetterSubject == "" {
+		return nil
 	}
 
-	return "", false
-}
-
-func findDLQSubjectHeuristic(cfg *config.Config) (string, bool) {
-	for _, stream := range cfg.ServiceNATS.Streams {
-		if strings.Contains(strings.ToLower(stream.Name), "dlq") {
-			if len(stream.Subjects) > 0 && strings.TrimSpace(stream.Subjects[0]) != "" {
-				return stream.Subjects[0], true
-			}
-		}
-
-		for _, subj := range stream.Subjects {
-			if strings.Contains(strings.ToLower(subj), ".dlq") {
-				return subj, true
+	for _, s := range serviceNATS.Streams {
+		for _, subj := range s.Subjects {
+			if subj == deadLetterSubject {
+				return nil
 			}
 		}
 	}
 
-	return "", false
+	dlq := configurator.StreamConfig{
+		Name:     "dlq",
+		Subjects: []string{deadLetterSubject},
+	}
+
+	dlqStreams := []configurator.StreamConfig{dlq}
+
+	err := configurator.CreateOrUpdateStreams(requestContext, jetstreamContext, dlqStreams)
+	if err != nil {
+		return fmt.Errorf("ensure dlq stream: %w", err)
+	}
+
+	return nil
 }
 
 func runWorker(requestContext context.Context, natsWorker *worker.NatsWorker, log *logger.Logger) {
@@ -498,6 +484,17 @@ func run() error {
 	setupJetStreamError := setupJetStream(requestContext, jetstreamContext, cfg)
 	if setupJetStreamError != nil {
 		return fmt.Errorf("failed to setup JetStream resources: %w", setupJetStreamError)
+	}
+
+	// Ensure a DLQ stream exists for the configured subject.
+	dlqEnsureErr := ensureDLQStream(
+		requestContext,
+		jetstreamContext,
+		&cfg.ServiceNATS,
+		cfg.PNGToTextService.DeadLetterSubject,
+	)
+	if dlqEnsureErr != nil {
+		return dlqEnsureErr
 	}
 
 	mainPipeline, initializePipelineError := initializePipeline(cfg, serviceLog)

@@ -56,12 +56,14 @@ type PathsConfig struct {
 
 // PNGToTextServiceConfig holds all settings specific to this service.
 type PNGToTextServiceConfig struct {
-	Tesseract    Tesseract    `toml:"tesseract"`
-	Gemini       Gemini       `toml:"gemini"`
-	Logging      Logging      `toml:"logging"`
-	Augmentation Augmentation `toml:"augmentation"`
-	Prompts      Prompts      `toml:"prompts"`
-	TTSDefaults  TTSDefaults  `toml:"tts_defaults"`
+    Tesseract    Tesseract    `toml:"tesseract"`
+    Gemini       Gemini       `toml:"gemini"`
+    Logging      Logging      `toml:"logging"`
+    Augmentation Augmentation `toml:"augmentation"`
+    Prompts      Prompts      `toml:"prompts"`
+    TTSDefaults  TTSDefaults  `toml:"tts_defaults"`
+    // DeadLetterSubject is the subject to publish failed messages to (DLQ).
+    DeadLetterSubject string `toml:"dead_letter_subject"`
 }
 
 // Config represents the complete, validated configuration for the service.
