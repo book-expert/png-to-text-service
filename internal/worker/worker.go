@@ -27,6 +27,11 @@ const (
 	NatsMaxReconnectAttempts = 5
 	// NatsFetchMaxWaitSeconds defines the maximum time to wait for messages during a fetch operation.
 	NatsFetchMaxWaitSeconds = 5
+
+	// DLQPublishMaxRetries defines how many times to retry publishing to the dead-letter subject on failure.
+	DLQPublishMaxRetries = 3
+	// DLQPublishBackoffSeconds defines backoff between DLQ publish attempts.
+	DLQPublishBackoffSeconds = 5
 )
 
 // Pipeline defines the interface for the processing logic.
@@ -62,12 +67,13 @@ type NatsWorker struct {
 
 // New creates a new NatsWorker.
 func New(
-	natsURL, streamName, subject, consumer, outputSubject, deadLetterSubject string,
-	pipeline Pipeline,
-	log *logger.Logger,
-	pngStore jetstream.ObjectStore,
-	textStore jetstream.ObjectStore, // New parameter
-	ttsDefaults TTSDefaults,
+    requestContext context.Context,
+    natsURL, streamName, subject, consumer, outputSubject, deadLetterSubject string,
+    pipeline Pipeline,
+    log *logger.Logger,
+    pngStore jetstream.ObjectStore,
+    textStore jetstream.ObjectStore, // New parameter
+    ttsDefaults TTSDefaults,
 ) (*NatsWorker, error) {
 	natsConn, err := nats.Connect(
 		natsURL,
@@ -81,23 +87,21 @@ func New(
 
 	log.Info("Connected to NATS server at %s", natsURL)
 
-	jetstream, err := jetstream.New(natsConn)
-	if err != nil {
-		return nil, fmt.Errorf("get JetStream context: %w", err)
-	}
+    jetstream, newJetstreamError := jetstream.New(natsConn)
+    if newJetstreamError != nil {
+        return nil, fmt.Errorf("get JetStream context: %w", newJetstreamError)
+    }
 
-	// Ensure the stream exists.
-	ctx := context.Background()
+    // Ensure the stream exists.
+    stream, getStreamError := jetstream.Stream(requestContext, streamName)
+    if getStreamError != nil {
+        return nil, fmt.Errorf("failed to get stream '%s': %w", streamName, getStreamError)
+    }
 
-	stream, err := jetstream.Stream(ctx, streamName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get stream '%s': %w", streamName, err)
-	}
-
-	_, err = stream.Info(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get stream info for '%s': %w", streamName, err)
-	}
+    _, streamInfoError := stream.Info(requestContext)
+    if streamInfoError != nil {
+        return nil, fmt.Errorf("failed to get stream info for '%s': %w", streamName, streamInfoError)
+    }
 
 	log.Info("Found stream '%s'.", streamName)
 
@@ -118,10 +122,10 @@ func New(
 }
 
 // Run starts the worker's message processing loop.
-func (w *NatsWorker) Run(ctx context.Context) error {
-	consumer, err := w.jetstream.Consumer(ctx, w.streamName, w.consumer)
-	if err != nil {
-		return fmt.Errorf("failed to get consumer: %w", err)
+func (w *NatsWorker) Run(requestContext context.Context) error {
+	consumer, getConsumerError := w.jetstream.Consumer(requestContext, w.streamName, w.consumer)
+	if getConsumerError != nil {
+		return fmt.Errorf("failed to get consumer: %w", getConsumerError)
 	}
 
 	w.logger.Info("Consumer '%s' is ready.", w.consumer)
@@ -129,47 +133,47 @@ func (w *NatsWorker) Run(ctx context.Context) error {
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-requestContext.Done():
 			w.logger.Info("Context canceled, worker shutting down.")
 
 			return nil
 		default:
-			batch, err := consumer.Fetch(1, jetstream.FetchMaxWait(NatsFetchMaxWaitSeconds*time.Second))
-			if err != nil {
-				if errors.Is(err, nats.ErrTimeout) {
+			batch, fetchBatchError := consumer.Fetch(1, jetstream.FetchMaxWait(NatsFetchMaxWaitSeconds*time.Second))
+			if fetchBatchError != nil {
+				if errors.Is(fetchBatchError, nats.ErrTimeout) {
 					continue // No messages, just loop again.
 				}
 
-				w.logger.Error("Fetch messages: %v", err)
+				w.logger.Error("Fetch messages: %v", fetchBatchError)
 
 				continue
 			}
 
 			for msg := range batch.Messages() {
-				w.handleMsg(ctx, msg)
+				w.handleMsg(requestContext, msg)
 			}
 		}
 	}
 }
 
-func (w *NatsWorker) handleMsg(ctx context.Context, msg jetstream.Msg) {
+func (w *NatsWorker) handleMsg(requestContext context.Context, msg jetstream.Msg) {
 	// handleMsg processes a single NATS message.
 	startTime := time.Now()
 
-	metaErr := w.checkMessageMetadata(msg)
-	if metaErr != nil {
-		w.handleMessageMetadataError(msg, metaErr)
+	checkMetadataError := w.checkMessageMetadata(msg)
+	if checkMetadataError != nil {
+		w.handleMessageMetadataError(msg, checkMetadataError)
 
 		return
 	}
 
 	var event events.PNGCreatedEvent
 
-	err := json.Unmarshal(msg.Data(), &event)
-	if err != nil {
+	unmarshalEventError := json.Unmarshal(msg.Data(), &event)
+	if unmarshalEventError != nil {
 		w.handleMessageMetadataError(
 			msg,
-			fmt.Errorf("failed to unmarshal PNGCreatedEvent: %w", err),
+			fmt.Errorf("failed to unmarshal PNGCreatedEvent: %w", unmarshalEventError),
 		)
 
 		return
@@ -177,9 +181,9 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg jetstream.Msg) {
 
 	w.logger.Info("Processing job for object: %s", event.PNGKey)
 
-	textKey, processErr := w.processAndPublishText(ctx, &event) // Get textKey here
-	if processErr != nil {
-		w.handleMessagePipelineError(ctx, msg, event.PNGKey, processErr)
+	textKey, processAndPublishError := w.processAndPublishText(requestContext, &event)
+	if processAndPublishError != nil {
+		w.handleMessagePipelineError(requestContext, msg, event.PNGKey, processAndPublishError)
 
 		return
 	}
@@ -189,49 +193,49 @@ func (w *NatsWorker) handleMsg(ctx context.Context, msg jetstream.Msg) {
 		event.PNGKey, textKey, time.Since(startTime), // Use textKey here
 	)
 
-	ackErr := msg.Ack()
-	if ackErr != nil {
+	acknowledgeError := msg.Ack()
+	if acknowledgeError != nil {
 		w.logger.Error(
 			"failed to acknowledge successful message for object %s: %v",
 			event.PNGKey,
-			ackErr,
+			acknowledgeError,
 		)
 	}
 }
 
 func (w *NatsWorker) processAndPublishText(
-	ctx context.Context,
+	requestContext context.Context,
 	event *events.PNGCreatedEvent,
 ) (string, error) {
-	pngBytes, readErr := w.fetchPNGBytes(ctx, event)
-	if readErr != nil {
-		return "", readErr
+	pngBytes, fetchPNGError := w.fetchPNGBytes(requestContext, event)
+	if fetchPNGError != nil {
+		return "", fetchPNGError
 	}
 
 	options := buildAugmentationOptions(event.Augmentation)
 
-	processedText, processErr := w.pipeline.Process(ctx, event.PNGKey, pngBytes, options)
-	if processErr != nil {
-		return "", fmt.Errorf("pipeline failed for '%s': %w", event.PNGKey, processErr)
+	processedText, processPipelineError := w.pipeline.Process(requestContext, event.PNGKey, pngBytes, options)
+	if processPipelineError != nil {
+		return "", fmt.Errorf("pipeline failed for '%s': %w", event.PNGKey, processPipelineError)
 	}
 
-	textObjectKey, storeErr := w.storeProcessedText(ctx, event, processedText)
-	if storeErr != nil {
-		return "", storeErr
+	textObjectKey, storeProcessedError := w.storeProcessedText(requestContext, event, processedText)
+	if storeProcessedError != nil {
+		return "", storeProcessedError
 	}
 
-	publishErr := w.publishTextProcessedEvent(ctx, event, textObjectKey)
-	if publishErr != nil {
-		return "", publishErr
+	publishProcessedEventError := w.publishTextProcessedEvent(requestContext, event, textObjectKey)
+	if publishProcessedEventError != nil {
+		return "", publishProcessedEventError
 	}
 
 	return textObjectKey, nil
 }
 
-func (w *NatsWorker) fetchPNGBytes(ctx context.Context, event *events.PNGCreatedEvent) ([]byte, error) {
-	pngDataReader, objectStoreErr := w.pngStore.Get(ctx, event.PNGKey)
-	if objectStoreErr != nil {
-		return nil, fmt.Errorf("failed to get PNG '%s' from object store: %w", event.PNGKey, objectStoreErr)
+func (w *NatsWorker) fetchPNGBytes(requestContext context.Context, event *events.PNGCreatedEvent) ([]byte, error) {
+	pngDataReader, getObjectError := w.pngStore.Get(requestContext, event.PNGKey)
+	if getObjectError != nil {
+		return nil, fmt.Errorf("failed to get PNG '%s' from object store: %w", event.PNGKey, getObjectError)
 	}
 
 	defer func() {
@@ -241,9 +245,9 @@ func (w *NatsWorker) fetchPNGBytes(ctx context.Context, event *events.PNGCreated
 		}
 	}()
 
-	pngDataBytes, readErr := io.ReadAll(pngDataReader)
-	if readErr != nil {
-		return nil, fmt.Errorf("failed to read PNG data for '%s': %w", event.PNGKey, readErr)
+	pngDataBytes, readPNGError := io.ReadAll(pngDataReader)
+	if readPNGError != nil {
+		return nil, fmt.Errorf("failed to read PNG data for '%s': %w", event.PNGKey, readPNGError)
 	}
 
 	return pngDataBytes, nil
@@ -259,7 +263,7 @@ func generateTextObjectKey(event *events.PNGCreatedEvent) string {
 }
 
 func (w *NatsWorker) storeProcessedText(
-	ctx context.Context,
+	requestContext context.Context,
 	event *events.PNGCreatedEvent,
 	processedText string,
 ) (string, error) {
@@ -271,7 +275,7 @@ func (w *NatsWorker) storeProcessedText(
 		event.TotalPages,
 	)
 
-    objectMeta := jetstream.ObjectMeta{
+	objectMeta := jetstream.ObjectMeta{
 		Name:        textObjectKey,
 		Description: objectDescription,
 		Headers:     nil,
@@ -279,16 +283,16 @@ func (w *NatsWorker) storeProcessedText(
 		Opts:        nil,
 	}
 
-	_, uploadErr := w.textStore.Put(ctx, objectMeta, bytes.NewReader([]byte(processedText)))
-	if uploadErr != nil {
-		return "", fmt.Errorf("failed to upload processed text to object store: %w", uploadErr)
+	_, putObjectError := w.textStore.Put(requestContext, objectMeta, bytes.NewReader([]byte(processedText)))
+	if putObjectError != nil {
+		return "", fmt.Errorf("failed to upload processed text to object store: %w", putObjectError)
 	}
 
 	return textObjectKey, nil
 }
 
 func (w *NatsWorker) publishTextProcessedEvent(
-	ctx context.Context,
+	requestContext context.Context,
 	event *events.PNGCreatedEvent,
 	textObjectKey string,
 ) error {
@@ -308,14 +312,14 @@ func (w *NatsWorker) publishTextProcessedEvent(
 		Temperature:       defaults.Temperature,
 	}
 
-	eventJSON, marshalErr := json.Marshal(processedEvent)
-	if marshalErr != nil {
-		return fmt.Errorf("failed to marshal TextProcessedEvent: %w", marshalErr)
+	eventJSON, marshalEventError := json.Marshal(processedEvent)
+	if marshalEventError != nil {
+		return fmt.Errorf("failed to marshal TextProcessedEvent: %w", marshalEventError)
 	}
 
-	_, publishErr := w.jetstream.Publish(ctx, w.outputSubject, eventJSON)
-	if publishErr != nil {
-		return fmt.Errorf("failed to publish TextProcessedEvent: %w", publishErr)
+	_, publishEventError := w.jetstream.Publish(requestContext, w.outputSubject, eventJSON)
+	if publishEventError != nil {
+		return fmt.Errorf("failed to publish TextProcessedEvent: %w", publishEventError)
 	}
 
 	return nil
@@ -379,28 +383,55 @@ func (w *NatsWorker) handleMessageMetadataError(msg jetstream.Msg, metaErr error
 }
 
 func (w *NatsWorker) handleMessagePipelineError(
-    ctx context.Context,
-    msg jetstream.Msg,
-    objectID string,
-    pipelineErr error,
+	requestContext context.Context,
+	msg jetstream.Msg,
+	objectID string,
+	pipelineErr error,
 ) {
 	w.logger.Error("Pipeline failed for '%s': %v", objectID, pipelineErr)
 
-	_, pubErr := w.jetstream.Publish(ctx, w.deadLetterSubject, msg.Data())
-	if pubErr != nil {
-		w.logger.Error(
-			"Failed to publish message to dead-letter subject for object %s: %v",
-			objectID,
-			pubErr,
-		)
+	// Dead-letter subject is required by blueprint. If missing, do not ack to allow redelivery.
+	if strings.TrimSpace(w.deadLetterSubject) == "" {
+		w.logger.Error("Dead-letter subject not configured; message will be redelivered for object %s", objectID)
+		// Intentionally do not Ack; allow redelivery based on consumer configuration.
+		return
 	}
 
-	ackErr := msg.Ack()
-	if ackErr != nil {
+	// Attempt DLQ publish with bounded retries and backoff.
+	var lastPublishError error
+
+	for attempt := 1; attempt <= DLQPublishMaxRetries; attempt++ {
+		_, publishDLQError := w.jetstream.Publish(requestContext, w.deadLetterSubject, msg.Data())
+		if publishDLQError == nil {
+			// DLQ publish succeeded; acknowledge the original message.
+			acknowledgeError := msg.Ack()
+			if acknowledgeError != nil {
+				w.logger.Error(
+					"failed to acknowledge failed message for object %s after DLQ publish: %v",
+					objectID,
+					acknowledgeError,
+				)
+			}
+
+			return
+		}
+
+		lastPublishError = publishDLQError
 		w.logger.Error(
-			"failed to acknowledge failed message for object %s: %v",
+			"DLQ publish attempt %d/%d failed for object %s: %v",
+			attempt,
+			DLQPublishMaxRetries,
 			objectID,
-			ackErr,
+			publishDLQError,
 		)
+
+		time.Sleep(time.Duration(DLQPublishBackoffSeconds) * time.Second)
 	}
+
+	// Exhausted retries; do not Ack to avoid message loss. Allow redelivery.
+	w.logger.Error(
+		"DLQ publish exhausted retries for object %s; preserving message for redelivery: %v",
+		objectID,
+		lastPublishError,
+	)
 }

@@ -29,6 +29,24 @@ const (
 	ShutdownGracePeriodSeconds = 2
 )
 
+// Static errors to satisfy err113 (no dynamic error construction without wrapping) and
+// to keep messages consistent and testable.
+var (
+	ErrObjectStoresCount    = errors.New("invalid configuration: expected at least 2 object stores (png and text)")
+	ErrConsumersCount       = errors.New("invalid configuration: expected at least 1 consumer")
+	ErrStreamsCount         = errors.New("invalid configuration: expected at least 2 streams (input and output)")
+	ErrOutputStreamSubjects = errors.New("invalid configuration: output stream must have at least 1 subject")
+	ErrDLQNoSubjects        = errors.New("dlq stream is configured without subjects")
+	ErrDLQNotFound          = errors.New(
+		"dead-letter subject not found: configure a 'dlq' stream with at least one subject",
+	)
+)
+
+const (
+	requiredObjectStoresCount   = 2
+	requiredStreamsMinimumCount = 2
+)
+
 func cloneParameterMap(src map[string]any) map[string]any {
 	if len(src) == 0 {
 		return nil
@@ -111,11 +129,11 @@ func initPipeline(
 			Enabled:         cfg.PNGToTextService.Augmentation.Defaults.Commentary.Enabled,
 			CustomAdditions: strings.TrimSpace(cfg.PNGToTextService.Augmentation.Defaults.Commentary.CustomAdditions),
 		},
-        Summary: augment.AugmentationSummaryOptions{
-            Enabled:         cfg.PNGToTextService.Augmentation.Defaults.Summary.Enabled,
-            Placement:       cfg.PNGToTextService.Augmentation.Defaults.Summary.Placement,
-            CustomAdditions: strings.TrimSpace(cfg.PNGToTextService.Augmentation.Defaults.Summary.CustomAdditions),
-        },
+		Summary: augment.AugmentationSummaryOptions{
+			Enabled:         cfg.PNGToTextService.Augmentation.Defaults.Summary.Enabled,
+			Placement:       cfg.PNGToTextService.Augmentation.Defaults.Summary.Placement,
+			CustomAdditions: strings.TrimSpace(cfg.PNGToTextService.Augmentation.Defaults.Summary.CustomAdditions),
+		},
 	}
 
 	mainPipeline, err := pipeline.New(
@@ -133,22 +151,38 @@ func initPipeline(
 	return mainPipeline, nil
 }
 
-func setupJetStream(ctx context.Context, jetstreamContext jetstream.JetStream, cfg *config.Config) error {
-	err := configurator.CreateOrUpdateStreams(ctx, jetstreamContext, cfg.ServiceNATS.Streams)
-	if err != nil {
-		return fmt.Errorf("failed to create streams: %w", err)
+func setupJetStream(requestContext context.Context, jetstreamContext jetstream.JetStream, cfg *config.Config) error {
+	createStreamsError := configurator.CreateOrUpdateStreams(
+		requestContext,
+		jetstreamContext,
+		cfg.ServiceNATS.Streams,
+	)
+	if createStreamsError != nil {
+		return fmt.Errorf("failed to create/update streams: %w", createStreamsError)
+	}
+
+	createConsumersError := configurator.CreateOrUpdateConsumers(
+		requestContext,
+		jetstreamContext,
+		cfg.ServiceNATS.Consumers,
+	)
+	if createConsumersError != nil {
+		return fmt.Errorf("failed to create/update consumers: %w", createConsumersError)
+	}
+
+	createStoresError := configurator.CreateOrUpdateObjectStores(
+		requestContext,
+		jetstreamContext,
+		cfg.ServiceNATS.ObjectStores,
+	)
+	if createStoresError != nil {
+		return fmt.Errorf("failed to create/update object stores: %w", createStoresError)
 	}
 
 	return nil
 }
 
-
-
-
-
-
-
-func ensureObjectStore(jetstreamContext jetstream.JetStream, bucket string) error {
+func ensureObjectStore(requestContext context.Context, jetstreamContext jetstream.JetStream, bucket string) error {
 	storeConfig := jetstream.ObjectStoreConfig{
 		Bucket:      bucket,
 		Description: "",
@@ -161,56 +195,166 @@ func ensureObjectStore(jetstreamContext jetstream.JetStream, bucket string) erro
 		Metadata:    nil,
 	}
 
-	_, createErr := jetstreamContext.CreateObjectStore(context.Background(), storeConfig)
-	if createErr != nil {
-		if errors.Is(createErr, jetstream.ErrBucketExists) {
-			_, lookupErr := jetstreamContext.ObjectStore(context.Background(), bucket)
-			if lookupErr != nil {
-				return fmt.Errorf("failed to access existing object store '%s': %w", bucket, lookupErr)
+	_, createObjectStoreError := jetstreamContext.CreateObjectStore(requestContext, storeConfig)
+	if createObjectStoreError != nil {
+		if errors.Is(createObjectStoreError, jetstream.ErrBucketExists) {
+			_, lookupStoreError := jetstreamContext.ObjectStore(requestContext, bucket)
+			if lookupStoreError != nil {
+				return fmt.Errorf("failed to access existing object store '%s': %w", bucket, lookupStoreError)
 			}
 
 			return nil
 		}
 
-		return fmt.Errorf("failed to create object store '%s': %w", bucket, createErr)
+		return fmt.Errorf("failed to create object store '%s': %w", bucket, createObjectStoreError)
 	}
 
 	return nil
 }
 
-
-
 func initNATSWorker(
+	requestContext context.Context,
 	cfg *config.Config,
 	mainPipeline *pipeline.Pipeline,
 	log *logger.Logger,
 	jetstreamContext jetstream.JetStream,
 ) (*worker.NatsWorker, error) {
-	pngBucket := cfg.ServiceNATS.ObjectStores[0].BucketName
-
-	ensurePNGStoreErr := ensureObjectStore(jetstreamContext, pngBucket)
-	if ensurePNGStoreErr != nil {
-		return nil, fmt.Errorf("failed to ensure PNG object store '%s': %w", pngBucket, ensurePNGStoreErr)
+	// Validate configuration shape before indexing
+	validateConfigError := validateNATSConfigCounts(cfg)
+	if validateConfigError != nil {
+		return nil, validateConfigError
 	}
 
-	pngStore, pngStoreErr := jetstreamContext.ObjectStore(context.Background(), pngBucket)
-	if pngStoreErr != nil {
-		return nil, fmt.Errorf("failed to retrieve PNG object store '%s': %w", pngBucket, pngStoreErr)
+    stores, resolveStoresError := resolveObjectStores(requestContext, jetstreamContext, cfg)
+    if resolveStoresError != nil {
+        return nil, resolveStoresError
+    }
+
+    pngStore := stores.png
+    textStore := stores.text
+
+    ttsDefaults := makeTTSDefaults(cfg)
+
+	// Determine the DLQ subject from configured streams (must exist per blueprint)
+	dlqSubject, findDLQError := findDLQSubject(cfg)
+	if findDLQError != nil {
+		return nil, findDLQError
 	}
 
-	textBucket := cfg.ServiceNATS.ObjectStores[1].BucketName
-
-	ensureTextStoreErr := ensureObjectStore(jetstreamContext, textBucket)
-	if ensureTextStoreErr != nil {
-		return nil, fmt.Errorf("failed to ensure text object store '%s': %w", textBucket, ensureTextStoreErr)
+	natsWorker, newWorkerError := worker.New(
+		requestContext,
+		cfg.ServiceNATS.NATS.URL,
+		cfg.ServiceNATS.Consumers[0].StreamName,
+		cfg.ServiceNATS.Consumers[0].FilterSubject,
+		cfg.ServiceNATS.Consumers[0].ConsumerName,
+		cfg.ServiceNATS.Streams[1].Subjects[0],
+		dlqSubject,
+		mainPipeline,
+		log,
+		pngStore,
+		textStore,
+		ttsDefaults,
+	)
+	if newWorkerError != nil {
+		return nil, fmt.Errorf("failed to initialize NATS worker: %w", newWorkerError)
 	}
 
-	textStore, textStoreErr := jetstreamContext.ObjectStore(context.Background(), textBucket)
-	if textStoreErr != nil {
-		return nil, fmt.Errorf("failed to retrieve text object store '%s': %w", textBucket, textStoreErr)
+	return natsWorker, nil
+}
+
+// validateNATSConfigCounts ensures required counts are present for robust operation before indexing.
+func validateNATSConfigCounts(cfg *config.Config) error {
+	if len(cfg.ServiceNATS.ObjectStores) < requiredObjectStoresCount {
+		return fmt.Errorf("%w: found %d", ErrObjectStoresCount, len(cfg.ServiceNATS.ObjectStores))
 	}
 
-	ttsDefaults := worker.TTSDefaults{
+	if len(cfg.ServiceNATS.Consumers) < 1 {
+		return fmt.Errorf("%w: found %d", ErrConsumersCount, len(cfg.ServiceNATS.Consumers))
+	}
+
+	if len(cfg.ServiceNATS.Streams) < requiredStreamsMinimumCount {
+		return fmt.Errorf("%w: found %d", ErrStreamsCount, len(cfg.ServiceNATS.Streams))
+	}
+
+	if len(cfg.ServiceNATS.Streams[1].Subjects) < 1 {
+		return fmt.Errorf("%w", ErrOutputStreamSubjects)
+	}
+
+	return nil
+}
+
+// findDLQSubject returns the first subject of a stream designated for dead-lettering.
+// The selection prefers a stream named "dlq" (case-insensitive). If not found,
+// it falls back to any stream whose name or subject contains ".dlq".
+func findDLQSubject(cfg *config.Config) (string, error) {
+	if subject, ok := findDLQSubjectExact(cfg); ok {
+		return subject, nil
+	}
+
+	if subject, ok := findDLQSubjectHeuristic(cfg); ok {
+		return subject, nil
+	}
+
+	return "", fmt.Errorf("%w", ErrDLQNotFound)
+}
+
+// resolveObjectStores ensures both source and destination object stores exist and returns handles.
+type resolvedStores struct {
+    png  jetstream.ObjectStore
+    text jetstream.ObjectStore
+}
+
+func resolveObjectStores(
+    requestContext context.Context,
+    jetstreamContext jetstream.JetStream,
+    cfg *config.Config,
+) (resolvedStores, error) {
+	pngBucketName := cfg.ServiceNATS.ObjectStores[0].BucketName
+
+	ensurePNGStoreError := ensureObjectStore(requestContext, jetstreamContext, pngBucketName)
+    if ensurePNGStoreError != nil {
+        return resolvedStores{}, fmt.Errorf(
+            "failed to ensure PNG object store '%s': %w",
+            pngBucketName,
+            ensurePNGStoreError,
+        )
+    }
+
+	pngStore, pngStoreLookupError := jetstreamContext.ObjectStore(requestContext, pngBucketName)
+    if pngStoreLookupError != nil {
+        return resolvedStores{}, fmt.Errorf(
+            "failed to retrieve PNG object store '%s': %w",
+            pngBucketName,
+            pngStoreLookupError,
+        )
+    }
+
+	textBucketName := cfg.ServiceNATS.ObjectStores[1].BucketName
+
+	ensureTextStoreError := ensureObjectStore(requestContext, jetstreamContext, textBucketName)
+    if ensureTextStoreError != nil {
+        return resolvedStores{}, fmt.Errorf(
+            "failed to ensure text object store '%s': %w",
+            textBucketName,
+            ensureTextStoreError,
+        )
+    }
+
+	textStore, textStoreLookupError := jetstreamContext.ObjectStore(requestContext, textBucketName)
+    if textStoreLookupError != nil {
+        return resolvedStores{}, fmt.Errorf(
+            "failed to retrieve text object store '%s': %w",
+            textBucketName,
+            textStoreLookupError,
+        )
+    }
+
+    return resolvedStores{png: pngStore, text: textStore}, nil
+}
+
+// makeTTSDefaults constructs TTS default parameters from configuration.
+func makeTTSDefaults(cfg *config.Config) worker.TTSDefaults {
+	return worker.TTSDefaults{
 		Voice:             cfg.PNGToTextService.TTSDefaults.Voice,
 		Seed:              cfg.PNGToTextService.TTSDefaults.Seed,
 		NGL:               cfg.PNGToTextService.TTSDefaults.NGL,
@@ -218,34 +362,47 @@ func initNATSWorker(
 		RepetitionPenalty: cfg.PNGToTextService.TTSDefaults.RepetitionPenalty,
 		Temperature:       cfg.PNGToTextService.TTSDefaults.Temperature,
 	}
-
-	natsWorker, err := worker.New(
-		cfg.ServiceNATS.NATS.URL,
-		cfg.ServiceNATS.Consumers[0].StreamName,
-		cfg.ServiceNATS.Consumers[0].FilterSubject,
-		cfg.ServiceNATS.Consumers[0].ConsumerName,
-		cfg.ServiceNATS.Streams[1].Subjects[0],
-		"", // Dead letter subject is not used in this service
-		mainPipeline,
-		log,
-		pngStore,
-		textStore, // Pass the new textStore
-		ttsDefaults,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize NATS worker: %w", err)
-	}
-
-	return natsWorker, nil
 }
 
-func runWorker(ctx context.Context, natsWorker *worker.NatsWorker, log *logger.Logger) {
+func findDLQSubjectExact(cfg *config.Config) (string, bool) {
+	for _, stream := range cfg.ServiceNATS.Streams {
+		if strings.EqualFold(strings.TrimSpace(stream.Name), "dlq") {
+			if len(stream.Subjects) > 0 && strings.TrimSpace(stream.Subjects[0]) != "" {
+				return stream.Subjects[0], true
+			}
+
+			return "", false
+		}
+	}
+
+	return "", false
+}
+
+func findDLQSubjectHeuristic(cfg *config.Config) (string, bool) {
+	for _, stream := range cfg.ServiceNATS.Streams {
+		if strings.Contains(strings.ToLower(stream.Name), "dlq") {
+			if len(stream.Subjects) > 0 && strings.TrimSpace(stream.Subjects[0]) != "" {
+				return stream.Subjects[0], true
+			}
+		}
+
+		for _, subj := range stream.Subjects {
+			if strings.Contains(strings.ToLower(subj), ".dlq") {
+				return subj, true
+			}
+		}
+	}
+
+	return "", false
+}
+
+func runWorker(requestContext context.Context, natsWorker *worker.NatsWorker, log *logger.Logger) {
 	go func() {
 		log.Info("Starting NATS worker...")
 
-		err := natsWorker.Run(ctx)
-		if err != nil {
-			log.Error("NATS worker stopped with error: %v", err)
+		runError := natsWorker.Run(requestContext)
+		if runError != nil {
+			log.Error("NATS worker stopped with error: %v", runError)
 			// No need to cancel context here, main will handle it.
 		}
 	}()
@@ -293,12 +450,13 @@ func initializePipeline(cfg *config.Config, serviceLog *logger.Logger) (*pipelin
 }
 
 func initializeWorker(
+	requestContext context.Context,
 	cfg *config.Config,
 	mainPipeline *pipeline.Pipeline,
 	serviceLog *logger.Logger,
 	jetstreamContext jetstream.JetStream,
 ) (*worker.NatsWorker, error) {
-	natsWorker, workerErr := initNATSWorker(cfg, mainPipeline, serviceLog, jetstreamContext)
+	natsWorker, workerErr := initNATSWorker(requestContext, cfg, mainPipeline, serviceLog, jetstreamContext)
 	if workerErr != nil {
 		serviceLog.Error("Failed to initialize NATS worker: %v", workerErr)
 
@@ -325,34 +483,40 @@ func run() error {
 		return initializationErr
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	requestContext, cancelRequest := context.WithCancel(context.Background())
+	defer cancelRequest()
 
 	signalChannel := make(chan os.Signal, 1)
 	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM)
 
-    natsConnection, jetstreamContext, err := configurator.SetupNATSComponents(cfg.ServiceNATS.NATS)
-    if err != nil {
-        return fmt.Errorf("setup NATS components: %w", err)
-    }
+	natsConnection, jetstreamContext, setupComponentsError := configurator.SetupNATSComponents(cfg.ServiceNATS.NATS)
+	if setupComponentsError != nil {
+		return fmt.Errorf("setup NATS components: %w", setupComponentsError)
+	}
 	defer natsConnection.Close()
 
-	setupErr := setupJetStream(ctx, jetstreamContext, cfg)
-	if setupErr != nil {
-		return fmt.Errorf("failed to setup JetStream streams: %w", setupErr)
+	setupJetStreamError := setupJetStream(requestContext, jetstreamContext, cfg)
+	if setupJetStreamError != nil {
+		return fmt.Errorf("failed to setup JetStream resources: %w", setupJetStreamError)
 	}
 
-	mainPipeline, pipelineErr := initializePipeline(cfg, serviceLog)
-	if pipelineErr != nil {
-		return pipelineErr
+	mainPipeline, initializePipelineError := initializePipeline(cfg, serviceLog)
+	if initializePipelineError != nil {
+		return initializePipelineError
 	}
 
-	natsWorker, workerErr := initializeWorker(cfg, mainPipeline, serviceLog, jetstreamContext)
-	if workerErr != nil {
-		return workerErr
+	natsWorker, initializeWorkerError := initializeWorker(
+		requestContext,
+		cfg,
+		mainPipeline,
+		serviceLog,
+		jetstreamContext,
+	)
+	if initializeWorkerError != nil {
+		return initializeWorkerError
 	}
 
-	runWorker(ctx, natsWorker, serviceLog)
+	runWorker(requestContext, natsWorker, serviceLog)
 
 	<-signalChannel
 	serviceLog.Info("Shutdown signal received, gracefully shutting down...")
