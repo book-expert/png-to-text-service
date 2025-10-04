@@ -49,27 +49,6 @@ var (
 	ErrTTSVoiceRequired = errors.New("png_to_text_service.tts_defaults.voice is required")
 )
 
-// NATSConfig holds all NATS and JetStream settings.
-type NATSConfig struct {
-	URL                      string `toml:"url"`
-	PDFStreamName            string `toml:"pdf_stream_name"`
-	PDFConsumerName          string `toml:"pdf_consumer_name"`
-	PDFCreatedSubject        string `toml:"pdf_created_subject"`
-	PDFObjectStoreBucket     string `toml:"pdf_object_store_bucket"`
-	PNGStreamName            string `toml:"png_stream_name"`
-	PNGConsumerName          string `toml:"png_consumer_name"`
-	PNGCreatedSubject        string `toml:"png_created_subject"`
-	PNGObjectStoreBucket     string `toml:"png_object_store_bucket"`
-	TextStreamName           string `toml:"text_stream_name"`
-	TextObjectStoreBucket    string `toml:"text_object_store_bucket"`
-	TTSStreamName            string `toml:"tts_stream_name"`
-	TTSConsumerName          string `toml:"tts_consumer_name"`
-	TextProcessedSubject     string `toml:"text_processed_subject"`
-	AudioChunkCreatedSubject string `toml:"audio_chunk_created_subject"`
-	AudioObjectStoreBucket   string `toml:"audio_object_store_bucket"`
-	DeadLetterSubject        string `toml:"dead_letter_subject"`
-}
-
 // PathsConfig holds common path configurations.
 type PathsConfig struct {
 	BaseLogsDir string `toml:"base_logs_dir"`
@@ -87,10 +66,10 @@ type PNGToTextServiceConfig struct {
 
 // Config represents the complete, validated configuration for the service.
 type Config struct {
-	Project          Project                `toml:"project"`
-	NATS             NATSConfig             `toml:"nats"`
-	Paths            PathsConfig            `toml:"paths"`
-	PNGToTextService PNGToTextServiceConfig `toml:"png_to_text_service"`
+	Project          Project                       `toml:"project"`
+	ServiceNATS      configurator.ServiceNATSConfig `toml:"png-to-text-service"`
+	Paths            PathsConfig                   `toml:"paths"`
+	PNGToTextService PNGToTextServiceConfig        `toml:"png_to_text_service"`
 }
 
 // Project contains project metadata.

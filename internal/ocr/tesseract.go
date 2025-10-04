@@ -1,4 +1,3 @@
-// Package ocr provides OCR functionality using Tesseract.
 package ocr
 
 import (

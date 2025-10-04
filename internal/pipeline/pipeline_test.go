@@ -15,9 +15,11 @@ import (
 )
 
 var (
-	errOcrError     = errors.New("ocr error")
-	errAugmentError = errors.New("augment error")
+    errOcrError     = errors.New("ocr error")
+    errAugmentError = errors.New("augment error")
 )
+
+const testOcrText = "ocr text"
 
 // mockOCRProcessor is a mock implementation of the ocr.Processor for testing.
 type mockOCRProcessor struct {
@@ -59,11 +61,11 @@ func newTestLogger(t *testing.T) *logger.Logger {
 func TestPipeline_Process_Success(t *testing.T) {
 	t.Parallel()
 	log := newTestLogger(t)
-	ocr := &mockOCRProcessor{
-		ProcessPNGFunc: func(_ context.Context, _ string) (string, error) {
-			return "ocr text", nil
-		},
-	}
+    ocr := &mockOCRProcessor{
+        ProcessPNGFunc: func(_ context.Context, _ string) (string, error) {
+            return testOcrText, nil
+        },
+    }
 	augmenter := &mockAugmenter{
 		AugmentTextWithOptionsFunc: func(
 			_ context.Context,
@@ -74,12 +76,15 @@ func TestPipeline_Process_Success(t *testing.T) {
 			if opts == nil || !opts.Commentary.Enabled {
 				t.Fatalf("expected commentary augmentation to be enabled")
 			}
+
 			return "augmented text", nil
 		},
 	}
-	defaultOptions := &augment.AugmentationOptions{
-		Commentary: augment.AugmentationCommentaryOptions{Enabled: true},
-	}
+    defaultOptions := &augment.AugmentationOptions{
+        Parameters: nil,
+        Commentary: augment.AugmentationCommentaryOptions{Enabled: true, CustomAdditions: ""},
+        Summary:    augment.AugmentationSummaryOptions{Enabled: false, Placement: "", CustomAdditions: ""},
+    }
 
 	testPipeline, err := pipeline.New(
 		ocr,
@@ -106,9 +111,11 @@ func TestPipeline_Process_OCR_Error(t *testing.T) {
 		},
 	}
 	augmenter := &mockAugmenter{AugmentTextWithOptionsFunc: nil}
-	defaultOptions := &augment.AugmentationOptions{
-		Commentary: augment.AugmentationCommentaryOptions{Enabled: true},
-	}
+    defaultOptions := &augment.AugmentationOptions{
+        Parameters: nil,
+        Commentary: augment.AugmentationCommentaryOptions{Enabled: true, CustomAdditions: ""},
+        Summary:    augment.AugmentationSummaryOptions{Enabled: false, Placement: "", CustomAdditions: ""},
+    }
 
 	testPipeline, err := pipeline.New(
 		ocr,
@@ -129,11 +136,11 @@ func TestPipeline_Process_OCR_Error(t *testing.T) {
 func TestPipeline_Process_Augment_Error(t *testing.T) {
 	t.Parallel()
 	log := newTestLogger(t)
-	ocr := &mockOCRProcessor{
-		ProcessPNGFunc: func(_ context.Context, _ string) (string, error) {
-			return "ocr text", nil
-		},
-	}
+    ocr := &mockOCRProcessor{
+        ProcessPNGFunc: func(_ context.Context, _ string) (string, error) {
+            return testOcrText, nil
+        },
+    }
 	augmenter := &mockAugmenter{
 		AugmentTextWithOptionsFunc: func(
 			_ context.Context,
@@ -144,12 +151,15 @@ func TestPipeline_Process_Augment_Error(t *testing.T) {
 			if opts == nil || !opts.Commentary.Enabled {
 				t.Fatalf("expected commentary enabled for augment error test")
 			}
+
 			return "", fmt.Errorf("mock augment error: %w", errAugmentError)
 		},
 	}
-	defaultOptions := &augment.AugmentationOptions{
-		Commentary: augment.AugmentationCommentaryOptions{Enabled: true},
-	}
+    defaultOptions := &augment.AugmentationOptions{
+        Parameters: nil,
+        Commentary: augment.AugmentationCommentaryOptions{Enabled: true, CustomAdditions: ""},
+        Summary:    augment.AugmentationSummaryOptions{Enabled: false, Placement: "", CustomAdditions: ""},
+    }
 
 	testPipeline, err := pipeline.New(
 		ocr,
@@ -164,7 +174,7 @@ func TestPipeline_Process_Augment_Error(t *testing.T) {
 	result, err := testPipeline.Process(context.Background(), "test-id", []byte("png data"), nil)
 
 	require.NoError(t, err)
-	assert.Equal(t, "ocr text", result)
+    assert.Equal(t, testOcrText, result)
 }
 
 func TestPipeline_Process_ShortText(t *testing.T) {
@@ -176,9 +186,11 @@ func TestPipeline_Process_ShortText(t *testing.T) {
 		},
 	}
 	augmenter := &mockAugmenter{AugmentTextWithOptionsFunc: nil}
-	defaultOptions := &augment.AugmentationOptions{
-		Commentary: augment.AugmentationCommentaryOptions{Enabled: true},
-	}
+    defaultOptions := &augment.AugmentationOptions{
+        Parameters: nil,
+        Commentary: augment.AugmentationCommentaryOptions{Enabled: true, CustomAdditions: ""},
+        Summary:    augment.AugmentationSummaryOptions{Enabled: false, Placement: "", CustomAdditions: ""},
+    }
 
 	testPipeline, err := pipeline.New(
 		ocr,
@@ -199,11 +211,11 @@ func TestPipeline_Process_ShortText(t *testing.T) {
 func TestPipeline_Process_DisabledOverrides(t *testing.T) {
 	t.Parallel()
 	log := newTestLogger(t)
-	ocr := &mockOCRProcessor{
-		ProcessPNGFunc: func(_ context.Context, _ string) (string, error) {
-			return "ocr text", nil
-		},
-	}
+    ocr := &mockOCRProcessor{
+        ProcessPNGFunc: func(_ context.Context, _ string) (string, error) {
+            return testOcrText, nil
+        },
+    }
 	augmenter := &mockAugmenter{
 		AugmentTextWithOptionsFunc: func(
 			_ context.Context,
@@ -212,12 +224,15 @@ func TestPipeline_Process_DisabledOverrides(t *testing.T) {
 			_ *augment.AugmentationOptions,
 		) (string, error) {
 			t.Fatalf("augmentation should be skipped when overrides disable it")
+
 			return "", nil
 		},
 	}
-	defaultOptions := &augment.AugmentationOptions{
-		Commentary: augment.AugmentationCommentaryOptions{Enabled: true},
-	}
+    defaultOptions := &augment.AugmentationOptions{
+        Parameters: nil,
+        Commentary: augment.AugmentationCommentaryOptions{Enabled: true, CustomAdditions: ""},
+        Summary:    augment.AugmentationSummaryOptions{Enabled: false, Placement: "", CustomAdditions: ""},
+    }
 
 	testPipeline, err := pipeline.New(
 		ocr,
@@ -229,12 +244,13 @@ func TestPipeline_Process_DisabledOverrides(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	overrides := &augment.AugmentationOptions{
-		Commentary: augment.AugmentationCommentaryOptions{Enabled: false},
-		Summary:    augment.AugmentationSummaryOptions{Enabled: false},
-	}
+    overrides := &augment.AugmentationOptions{
+        Parameters: nil,
+        Commentary: augment.AugmentationCommentaryOptions{Enabled: false, CustomAdditions: ""},
+        Summary:    augment.AugmentationSummaryOptions{Enabled: false, Placement: "", CustomAdditions: ""},
+    }
 
 	result, err := testPipeline.Process(context.Background(), "test-id", []byte("png data"), overrides)
 	require.NoError(t, err)
-	assert.Equal(t, "ocr text", result)
+    assert.Equal(t, testOcrText, result)
 }

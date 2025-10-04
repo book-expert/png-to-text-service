@@ -1,18 +1,19 @@
 package config_test
 
 import (
-	"fmt"
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"testing"
+    "fmt"
+    "net/http"
+    "net/http/httptest"
+    "os"
+    "path/filepath"
+    "testing"
 
-	"github.com/book-expert/logger"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+    configurator "github.com/book-expert/configurator"
+    "github.com/book-expert/logger"
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
 
-	"github.com/book-expert/png-to-text-service/internal/config"
+    "github.com/book-expert/png-to-text-service/internal/config"
 )
 
 // Constants for test data and configuration content.
@@ -39,12 +40,18 @@ func newTestConfig(t *testing.T) *config.Config {
 	tmpDir := t.TempDir()
 	apiKeyEnvName := geminiAPIKeyEnvName
 
-	return &config.Config{
-		Project:          newTestProjectConfig(t),
-		Paths:            newTestPathsConfig(t, tmpDir),
-		PNGToTextService: newTestPNGToTextServiceConfig(t, tmpDir, apiKeyEnvName),
-		NATS:             newTestNATSConfig(t),
-	}
+    return &config.Config{
+        Project:          newTestProjectConfig(t),
+        Paths:            newTestPathsConfig(t, tmpDir),
+        PNGToTextService: newTestPNGToTextServiceConfig(t, tmpDir, apiKeyEnvName),
+        ServiceNATS: configurator.ServiceNATSConfig{
+            NATS:         configurator.NATSConfig{URL: ""},
+            Streams:      []configurator.StreamConfig{},
+            Consumers:    []configurator.ConsumerConfig{},
+            ObjectStores: []configurator.ObjectStoreConfig{},
+            KeyValue:     nil,
+        },
+    }
 }
 
 func newTestProjectConfig(t *testing.T) config.Project {
@@ -123,29 +130,7 @@ func newTestPNGToTextServiceConfig(t *testing.T, tmpDir, apiKeyEnvName string) c
 	}
 }
 
-func newTestNATSConfig(t *testing.T) config.NATSConfig {
-	t.Helper()
 
-	return config.NATSConfig{
-		URL:                      "nats://127.0.0.1:4222",
-		PDFStreamName:            "PDF_JOBS",
-		PDFConsumerName:          "pdf-workers",
-		PDFCreatedSubject:        "pdf.created",
-		PDFObjectStoreBucket:     "PDF_FILES",
-		PNGStreamName:            "PNG_PROCESSING",
-		PNGConsumerName:          "png-text-workers",
-		PNGCreatedSubject:        "png.created",
-		PNGObjectStoreBucket:     "PNG_FILES",
-		TextObjectStoreBucket:    "TEXT_FILES",
-		TTSStreamName:            "TTS_JOBS",
-		TTSConsumerName:          "tts-workers",
-		TextProcessedSubject:     "text.processed",
-		AudioChunkCreatedSubject: "audio.chunk.created",
-		AudioObjectStoreBucket:   "AUDIO_FILES",
-		TextStreamName:           "TTS_JOBS",
-		DeadLetterSubject:        "dead.letter",
-	}
-}
 
 // TestLoad_Success tests loading a valid configuration file.
 func TestLoad_Success(t *testing.T) {

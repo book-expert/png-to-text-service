@@ -74,77 +74,112 @@ func New(
 
 // Process handles the full workflow for a single object.
 func (p *Pipeline) Process(
-	ctx context.Context,
-	objectID string,
-	pngData []byte,
+    ctx context.Context,
+    objectID string,
+    pngData []byte,
 	overrides *augment.AugmentationOptions,
 ) (string, error) {
-	p.logger.Info("Processing job for object: %s", objectID)
-
-	// REMOVED: The call to storage.GetObject is no longer needed.
-
-	tmpFile, err := p.createTempFile(pngData)
+	cleanedText, err := p.processPNG(ctx, objectID, pngData)
 	if err != nil {
-		return "", fmt.Errorf("create temp file for '%s': %w", objectID, err)
+		return "", err
 	}
 
-	tmpFileName := tmpFile.Name()
+	// If the text is too short, skip augmentation.
+	if len(strings.TrimSpace(cleanedText)) < p.minTextLength {
+		p.logger.Info("Skipping augmentation for %s due to short text", objectID)
+
+		return cleanedText, nil
+	}
+
+	// Merge default options with any overrides.
+	mergedOptions := p.mergeAugmentationOptions(overrides)
+
+	// If augmentation is disabled via options, return the OCR text.
+	if mergedOptions == nil || (!mergedOptions.Commentary.Enabled && !mergedOptions.Summary.Enabled) {
+		p.logger.Info("Augmentation disabled for %s; returning OCR text", objectID)
+
+		return cleanedText, nil
+	}
+
+	// Create a temporary PNG file for the augmenter to read from.
+	tempImageFile, createTempImageErr := p.createTempFile(pngData)
+	if createTempImageErr != nil {
+		return "", fmt.Errorf("create temp image for '%s': %w", objectID, createTempImageErr)
+	}
+
+	tempImagePath := tempImageFile.Name()
 
 	if !p.keepTempFiles {
 		defer func() {
-			err := os.Remove(tmpFileName)
-			if err != nil {
-				p.logger.Error(
-					"Failed to remove temporary file %s: %v",
-					tmpFileName,
-					err,
-				)
+			removeTempImageErr := os.Remove(tempImagePath)
+			if removeTempImageErr != nil {
+				p.logger.Error("Failed to remove temp image %s: %v", tempImagePath, removeTempImageErr)
 			}
 		}()
 	}
 
-	p.logger.Info("Running OCR on temporary file: %s", tmpFileName)
+	// Attempt augmentation; on failure, fall back to the OCR text.
+	augmentedText, augmentErr := p.augmenter.AugmentTextWithOptions(
+		ctx,
+		cleanedText,
+		tempImagePath,
+		mergedOptions,
+	)
+	if augmentErr != nil {
+		p.logger.Error("Augmentation failed for %s: %v", objectID, augmentErr)
 
-	cleanedText, err := p.ocr.ProcessPNG(ctx, tmpFileName)
-	if err != nil {
-		return "", fmt.Errorf("OCR processing: %w", err)
-	}
-
-	if len(cleanedText) < p.minTextLength {
-		p.logger.Warn(
-			"OCR text for %s is too short (%d chars), skipping augmentation.",
-			objectID,
-			len(cleanedText),
-		)
-	} else {
-		effectiveOptions := p.mergeAugmentationOptions(overrides)
-
-		if effectiveOptions.Commentary.Enabled || effectiveOptions.Summary.Enabled {
-			p.logger.Info("Augmenting text for %s", objectID)
-
-			augmentedText, err := p.augmenter.AugmentTextWithOptions(ctx, cleanedText, tmpFileName, effectiveOptions)
-			if err != nil {
-				p.logger.Warn("Text augmentation failed for %s: %v. Using cleaned OCR text as fallback.", objectID, err)
-			} else {
-				cleanedText = augmentedText
-			}
-		} else {
-			p.logger.Info("Augmentation disabled for %s; returning OCR text.", objectID)
-		}
+		return cleanedText, nil
 	}
 
 	p.logger.Info("Successfully processed object %s", objectID)
 
-	return cleanedText, nil
+	return augmentedText, nil
+}
+
+func (p *Pipeline) processPNG(ctx context.Context, objectID string, pngData []byte) (string, error) {
+    p.logger.Info("Processing job for object: %s", objectID)
+
+    tmpFile, err := p.createTempFile(pngData)
+    if err != nil {
+        return "", fmt.Errorf("create temp file for '%s': %w", objectID, err)
+    }
+
+    tmpFileName := tmpFile.Name()
+
+    if !p.keepTempFiles {
+        defer func() {
+            removeErr := os.Remove(tmpFileName)
+            if removeErr != nil {
+                p.logger.Error(
+                    "Failed to remove temporary file %s: %v",
+                    tmpFileName,
+                    removeErr,
+                )
+            }
+        }()
+    }
+
+    p.logger.Info("Running OCR on temporary file: %s", tmpFileName)
+
+    cleanedText, ocrErr := p.ocr.ProcessPNG(ctx, tmpFileName)
+    if ocrErr != nil {
+        return "", fmt.Errorf("OCR processing: %w", ocrErr)
+    }
+
+    return cleanedText, nil
 }
 
 func (p *Pipeline) mergeAugmentationOptions(
 	overrides *augment.AugmentationOptions,
 ) *augment.AugmentationOptions {
-	base := cloneAugmentationOptions(p.defaultAugmentation)
-	if base == nil {
-		base = &augment.AugmentationOptions{}
-	}
+    base := cloneAugmentationOptions(p.defaultAugmentation)
+    if base == nil {
+        base = &augment.AugmentationOptions{
+            Parameters: nil,
+            Commentary: augment.AugmentationCommentaryOptions{Enabled: false, CustomAdditions: ""},
+            Summary:    augment.AugmentationSummaryOptions{Enabled: false, Placement: "", CustomAdditions: ""},
+        }
+    }
 
 	if overrides == nil {
 		return base
@@ -163,6 +198,7 @@ func (p *Pipeline) mergeAugmentationOptions(
 	if overrides.Summary.Placement != "" {
 		base.Summary.Placement = overrides.Summary.Placement
 	}
+
 	if addition := strings.TrimSpace(overrides.Summary.CustomAdditions); addition != "" {
 		base.Summary.CustomAdditions = appendInstruction(base.Summary.CustomAdditions, addition)
 	}

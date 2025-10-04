@@ -156,10 +156,10 @@ func (g *GeminiProcessor) AugmentTextWithOptions(
 		return "", fmt.Errorf("validate inputs: %w", err)
 	}
 
-	imageData, mimeType, err := g.prepareImageData(imagePath)
-	if err != nil {
-		return "", err
-	}
+    imageData, mimeType, _, err := g.prepareImageData(imagePath)
+    if err != nil {
+        return "", err
+    }
 
 	prompt, err := g.buildPromptWithOptions(ocrText, imagePath, opts)
 	if err != nil {
@@ -181,8 +181,8 @@ func (g *GeminiProcessor) buildPromptWithOptions(
 }
 
 func (g *GeminiProcessor) buildPromptWithBuilder(
-	ocrText, imagePath string,
-	opts *AugmentationOptions,
+    ocrText, imagePath string,
+    opts *AugmentationOptions,
 ) (string, error) {
 	// 1. Create a FileProcessor with default settings.
 	allowedExtensions := []string{
@@ -196,12 +196,15 @@ func (g *GeminiProcessor) buildPromptWithBuilder(
 	// 2. Create the builder by passing the FileProcessor.
 	builder := promptbuilder.New(fileProcessor)
 
-	req := &promptbuilder.BuildRequest{
-		Prompt:        ocrText,
-		File:          imagePath,
-		SystemMessage: g.composeSystemMessage(opts),
-		Guidelines:    g.composeGuidelines(opts),
-	}
+    req := &promptbuilder.BuildRequest{
+        Task:          "commentary",
+        Image:         imagePath,
+        Prompt:        ocrText,
+        File:          "",
+        SystemMessage: g.composeSystemMessage(opts),
+        Guidelines:    g.composeGuidelines(opts),
+        OutputFormat:  "text",
+    }
 
 	result, err := builder.BuildPrompt(req)
 	if err != nil {
@@ -245,6 +248,7 @@ func (g *GeminiProcessor) composeSystemMessage(opts *AugmentationOptions) string
 	if opts.Summary.Enabled {
 		summary := strings.TrimSpace(g.config.SummaryBasePrompt)
 		placement := g.summaryPlacementDirective(opts.Summary.Placement)
+
 		summary = fmt.Sprintf("%s\n\nPlacement guidance: %s.", summary, placement)
 		if addition := strings.TrimSpace(opts.Summary.CustomAdditions); addition != "" {
 			summary = fmt.Sprintf("%s\n\nAdditional summary guidance:\n%s", summary, addition)
@@ -263,15 +267,20 @@ func (g *GeminiProcessor) composeGuidelines(opts *AugmentationOptions) string {
 
 	var guidelines []string
 
-	if opts.Commentary.Enabled {
-		guidelines = append(guidelines, "Maintain the original OCR prose verbatim; only add descriptive commentary where the visuals appear.")
-	}
+    if opts.Commentary.Enabled {
+        guidelines = append(
+            guidelines,
+            "Maintain the original OCR prose verbatim;"+
+                " only add descriptive commentary where the visuals appear.",
+        )
+    }
 
 	if opts.Summary.Enabled {
 		direction := "after the narration-ready OCR text"
 		if opts.Summary.Placement == events.SummaryPlacementTop {
 			direction = "before the narration-ready OCR text"
 		}
+
 		guidelines = append(guidelines, fmt.Sprintf("Provide a concise summary %s.", direction))
 	}
 
@@ -304,29 +313,29 @@ func (g *GeminiProcessor) validateInputs(_, imagePath string) error {
 
 func (g *GeminiProcessor) prepareImageData(
 	imagePath string,
-) (imageData, mimeType string, err error) {
-	imageData, mimeType, err = g.readAndEncodeImage(imagePath)
+) (imageData, mimeType string, imageBytes []byte, err error) {
+	imageData, mimeType, imageBytes, err = g.readAndEncodeImage(imagePath)
 	if err != nil {
-		return "", "", fmt.Errorf("read image: %w", err)
+		return "", "", nil, fmt.Errorf("read image: %w", err)
 	}
 
-	return imageData, mimeType, nil
+	return imageData, mimeType, imageBytes, nil
 }
 
 func (g *GeminiProcessor) readAndEncodeImage(
 	imagePath string,
-) (encodedData, mimeType string, err error) {
+) (encodedData, mimeType string, imageBytes []byte, err error) {
 	cleanedImagePath := filepath.Clean(imagePath)
 
-	imageBytes, err := os.ReadFile(cleanedImagePath)
+	imageBytes, err = os.ReadFile(cleanedImagePath)
 	if err != nil {
-		return "", "", fmt.Errorf("read image file: %w", err)
+		return "", "", nil, fmt.Errorf("read image file: %w", err)
 	}
 
 	encoded := base64.StdEncoding.EncodeToString(imageBytes)
 	detectedMimeType := g.detectImageMimeType(imagePath)
 
-	return encoded, detectedMimeType, nil
+	return encoded, detectedMimeType, imageBytes, nil
 }
 
 func (g *GeminiProcessor) detectImageMimeType(imagePath string) string {

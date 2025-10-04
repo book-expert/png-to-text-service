@@ -1,106 +1,57 @@
-# PNG-to-Text-Service Makefile
-# Follows strict Go coding standards with comprehensive tooling
+# Makefile for the png-to-text-service component providing build, lint, and test workflows.
+GO_PACKAGES := ./...
+SERVICE_NAME := png-to-text-service
+SERVICE_ENTRYPOINT := ./cmd/png-to-text-service
+BINARY_DIRECTORY := $(HOME)/bin
+BINARY_PATH := $(BINARY_DIRECTORY)/$(SERVICE_NAME)
 
-.PHONY: all build test lint clean fmt vet check deps install help
+.PHONY: build test test-cover test-race clean fmt vet lint run install help
 
-# Default target
-all: check build test
-
-# Build the application
 build:
-	@echo "Building png-to-text-service..."
-	@mkdir -p ~/bin
-	@go build -o ~/bin/png-to-text-service ./cmd/png-to-text-service
+	mkdir -p $(BINARY_DIRECTORY)
+	go build -o $(BINARY_PATH) $(SERVICE_ENTRYPOINT)
 
-# Install dependencies
-deps:
-	@echo "Installing dependencies..."
-	@go mod download
-	@go mod tidy
-
-# Format code
-fmt:
-	@echo "Formatting code..."
-	@gofmt -w -s .
-
-# Vet code
-vet:
-	@echo "Running go vet..."
-	@go vet ./...
-
-# Run comprehensive linting
-lint:
-	@echo "Running golangci-lint..."
-	@gofmt -w -s .
-	@go vet ./...
-	@golangci-lint run --fix ./...
-	@golangci-lint cache clean
-	@go clean -cache
-
-
-
-# Run tests
 test:
-	@echo "Running tests..."
-	@go test -v -race -coverprofile=coverage.out ./...
+	go test -v $(GO_PACKAGES)
 
-# Run tests with coverage report
-test-coverage: test
-	@echo "Generating coverage report..."
-	@go tool cover -html=coverage.out -o coverage.html
-	@echo "Coverage report generated: coverage.html"
+test-cover:
+	go test -coverprofile=coverage.out $(GO_PACKAGES)
+	go tool cover -html=coverage.out
 
-# Run benchmarks
-bench:
-	@echo "Running benchmarks..."
-	@go test -bench=. -benchmem ./...
+test-race:
+	go test -race $(GO_PACKAGES)
 
-# Comprehensive quality check (lint + vet + test)
-check: fmt vet lint test
-
-# Clean build artifacts
 clean:
-	@echo "Cleaning build artifacts..."
-	@rm -rf bin/
-	@rm -f coverage.out coverage.html
+	rm -f $(BINARY_PATH)
+	rm -f coverage.out
 
-# Install the binary to $GOPATH/bin
-install: build
-	@echo "Installing to $GOPATH/bin..."
-	@cp bin/png-to-text-service $(GOPATH)/bin/
+fmt:
+	gofmt -s -w .
 
-# Development setup
-dev-setup:
-	@echo "Setting up development environment..."
-	@go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+vet:
+	go vet $(GO_PACKAGES)
 
-# Run the application with example configuration
+lint:
+	golangci-lint run --fix ./...
+	golangci-lint cache clean
+	go clean -r -cache
+
 run:
-	@echo "Running png-to-text-service..."
-	@./bin/png-to-text-service -config project.toml
+	go run $(SERVICE_ENTRYPOINT)
 
-# Generate Go module documentation
-docs:
-	@echo "Generating documentation..."
-	@godoc -http=:6060 &
-	@echo "Documentation server started at http://localhost:6060"
+install:
+	go mod tidy
 
-# Help target
 help:
 	@echo "Available targets:"
-	@echo "  all         - Run check, build, and test"
-	@echo "  build       - Build the application binary"
-	@echo "  deps        - Install and tidy dependencies"
-	@echo "  fmt         - Format Go code"
-	@echo "  vet         - Run go vet"
-	@echo "  lint        - Run golangci-lint"
-	@echo "  test        - Run tests with race detection"
-	@echo "  test-coverage - Run tests and generate coverage report"
-	@echo "  bench       - Run benchmarks"
-	@echo "  check       - Run comprehensive quality checks"
-	@echo "  clean       - Clean build artifacts"
-	@echo "  install     - Install binary to \$$GOPATH/bin"
-	@echo "  dev-setup   - Set up development tools"
-	@echo "  run         - Run the application"
-	@echo "  docs        - Start documentation server"
-	@echo "  help        - Show this help message"
+	@echo "  build        - Build the application binary into $(BINARY_DIRECTORY)"
+	@echo "  test         - Run unit tests"
+	@echo "  test-cover   - Run unit tests with coverage"
+	@echo "  test-race    - Run unit tests with the race detector"
+	@echo "  clean        - Remove generated binaries and coverage artifacts"
+	@echo "  fmt          - Format Go source files"
+	@echo "  vet          - Run go vet on the module"
+	@echo "  lint         - Run golangci-lint and clean caches"
+	@echo "  run          - Run the application"
+	@echo "  install      - Synchronize module dependencies"
+	@echo "  help         - Show this help message"
