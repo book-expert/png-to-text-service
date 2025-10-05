@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,21 @@ import (
 	"github.com/book-expert/logger"
 	"github.com/book-expert/png-to-text-service/internal/shared"
 	"github.com/book-expert/prompt-builder/promptbuilder"
+)
+
+var (
+	// ErrImagePathRequired is returned when the image path is empty.
+	ErrImagePathRequired = errors.New("image path is required")
+	// ErrFileEmpty indicates that the file is empty.
+	ErrFileEmpty         = errors.New("file is empty")
+	// ErrEmptyResponse is returned when the Gemini API returns an empty response.
+	ErrEmptyResponse = errors.New("empty response")
+	// ErrNoCandidates is returned when the Gemini API response contains no candidates.
+	ErrNoCandidates = errors.New("no candidates in response")
+	// ErrGeminiAPIError is returned when the Gemini API returns an error.
+	ErrGeminiAPIError = errors.New("gemini API error")
+	// ErrMaxRetries is returned when the maximum number of retries is exceeded.
+	ErrMaxRetries = errors.New("max retries exceeded")
 )
 
 const (
@@ -124,10 +140,7 @@ func (g *GeminiProcessor) AugmentTextWithOptions(
 		return "", fmt.Errorf("validate inputs: %w", err)
 	}
 
-    imageData, mimeType, _, err := g.prepareImageData(pngData)
-    if err != nil {
-        return "", err
-    }
+    imageData, mimeType, _ := g.prepareImageData(pngData)
 
 	prompt, err := g.buildPromptWithOptions(ocrText, pngData, opts)
 	if err != nil {
@@ -268,7 +281,7 @@ func (g *GeminiProcessor) summaryPlacementDirective(placement SummaryPlacement) 
 	}
 }
 
-func (g *GeminiProcessor) validateInputs(ocrText string, pngData []byte) error {
+func (g *GeminiProcessor) validateInputs(_ string, pngData []byte) error {
 	if len(pngData) == 0 {
 		return ErrFileEmpty
 	}
@@ -278,11 +291,11 @@ func (g *GeminiProcessor) validateInputs(ocrText string, pngData []byte) error {
 
 func (g *GeminiProcessor) prepareImageData(
 	pngData []byte,
-) (imageData, mimeType string, imageBytes []byte, err error) {
+) (string, string, []byte) {
 	encoded := base64.StdEncoding.EncodeToString(pngData)
 	detectedMimeType := "image/png"
 
-	return encoded, detectedMimeType, pngData, nil
+	return encoded, detectedMimeType, pngData
 }
 
 

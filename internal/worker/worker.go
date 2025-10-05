@@ -14,7 +14,7 @@ import (
 
 	"github.com/book-expert/events"
 	"github.com/book-expert/logger"
-	"github.com/book-expert/png-to-text-service/internal/augment"
+	"github.com/book-expert/png-to-text-service/internal/shared"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -36,7 +36,7 @@ const (
 
 // Pipeline defines the interface for the processing logic.
 type Pipeline interface {
-	Process(ctx context.Context, objectID string, data []byte, overrides *augment.AugmentationOptions) (string, error)
+	Process(ctx context.Context, objectID string, data []byte, overrides *shared.AugmentationOptions) (string, error)
 }
 
 // TTSDefaults holds default parameters for downstream text-to-speech processing.
@@ -327,7 +327,7 @@ func (w *NatsWorker) publishTextProcessedEvent(
 
 func buildAugmentationOptions(
 	prefs *events.AugmentationPreferences,
-) *augment.AugmentationOptions {
+) *shared.AugmentationOptions {
 	if prefs == nil {
 		return nil
 	}
@@ -337,13 +337,13 @@ func buildAugmentationOptions(
 
 	placement := sanitizeSummaryPlacement(prefs.Summary.Placement)
 
-	return &augment.AugmentationOptions{
+	return &shared.AugmentationOptions{
 		Parameters: nil,
-		Commentary: augment.AugmentationCommentaryOptions{
+		Commentary: shared.AugmentationCommentaryOptions{
 			Enabled:         prefs.Commentary.Enabled,
 			CustomAdditions: commentaryInstructions,
 		},
-		Summary: augment.AugmentationSummaryOptions{
+		Summary: shared.AugmentationSummaryOptions{
 			Enabled:         prefs.Summary.Enabled,
 			Placement:       placement,
 			CustomAdditions: summaryInstructions,
@@ -351,7 +351,7 @@ func buildAugmentationOptions(
 	}
 }
 
-func sanitizeSummaryPlacement(placement events.SummaryPlacement) augment.SummaryPlacement {
+func sanitizeSummaryPlacement(placement events.SummaryPlacement) shared.SummaryPlacement {
 	switch placement {
 	case events.SummaryPlacementTop,
 		events.SummaryPlacementBottom:

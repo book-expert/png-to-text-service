@@ -1,3 +1,5 @@
+// Package shared provides types that are shared across multiple packages in the
+// png-to-text-service to avoid circular dependencies.
 package shared
 
 import "github.com/book-expert/events"

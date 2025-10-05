@@ -19,6 +19,7 @@ import (
 	"github.com/book-expert/png-to-text-service/internal/config"
 	"github.com/book-expert/png-to-text-service/internal/ocr"
 	"github.com/book-expert/png-to-text-service/internal/pipeline"
+	"github.com/book-expert/png-to-text-service/internal/shared"
 	"github.com/book-expert/png-to-text-service/internal/worker"
 )
 
@@ -32,10 +33,16 @@ const (
 // Static errors to satisfy err113 (no dynamic error construction without wrapping) and
 // to keep messages consistent and testable.
 var (
-	ErrObjectStoresCount    = errors.New("invalid configuration: expected at least 2 object stores (png and text)")
-	ErrConsumersCount       = errors.New("invalid configuration: expected at least 1 consumer")
-	ErrStreamsCount         = errors.New("invalid configuration: expected at least 2 streams (input and output)")
-	ErrOutputStreamSubjects = errors.New("invalid configuration: output stream must have at least 1 subject")
+	ErrObjectStoresCount = errors.New(
+		"invalid configuration: expected at least 2 object stores (png and text)",
+	)
+	ErrConsumersCount = errors.New("invalid configuration: expected at least 1 consumer")
+	ErrStreamsCount   = errors.New(
+		"invalid configuration: expected at least 2 streams (input and output)",
+	)
+	ErrOutputStreamSubjects = errors.New(
+		"invalid configuration: output stream must have at least 1 subject",
+	)
 	// ErrDeadLetterSubjectEmpty indicates the DLQ subject is missing from service config.
 	ErrDeadLetterSubjectEmpty = errors.New("dead letter subject must be configured")
 )
@@ -121,16 +128,20 @@ func initPipeline(
 	cfg *config.Config,
 	log *logger.Logger,
 ) (*pipeline.Pipeline, error) {
-	defaultOptions := &augment.AugmentationOptions{
+	defaultOptions := &shared.AugmentationOptions{
 		Parameters: cloneParameterMap(cfg.PNGToTextService.Augmentation.Parameters),
-		Commentary: augment.AugmentationCommentaryOptions{
-			Enabled:         cfg.PNGToTextService.Augmentation.Defaults.Commentary.Enabled,
-			CustomAdditions: strings.TrimSpace(cfg.PNGToTextService.Augmentation.Defaults.Commentary.CustomAdditions),
+		Commentary: shared.AugmentationCommentaryOptions{
+			Enabled: cfg.PNGToTextService.Augmentation.Defaults.Commentary.Enabled,
+			CustomAdditions: strings.TrimSpace(
+				cfg.PNGToTextService.Augmentation.Defaults.Commentary.CustomAdditions,
+			),
 		},
-		Summary: augment.AugmentationSummaryOptions{
-			Enabled:         cfg.PNGToTextService.Augmentation.Defaults.Summary.Enabled,
-			Placement:       cfg.PNGToTextService.Augmentation.Defaults.Summary.Placement,
-			CustomAdditions: strings.TrimSpace(cfg.PNGToTextService.Augmentation.Defaults.Summary.CustomAdditions),
+		Summary: shared.AugmentationSummaryOptions{
+			Enabled:   cfg.PNGToTextService.Augmentation.Defaults.Summary.Enabled,
+			Placement: cfg.PNGToTextService.Augmentation.Defaults.Summary.Placement,
+			CustomAdditions: strings.TrimSpace(
+				cfg.PNGToTextService.Augmentation.Defaults.Summary.CustomAdditions,
+			),
 		},
 	}
 
@@ -149,7 +160,11 @@ func initPipeline(
 	return mainPipeline, nil
 }
 
-func setupJetStream(requestContext context.Context, jetstreamContext jetstream.JetStream, cfg *config.Config) error {
+func setupJetStream(
+	requestContext context.Context,
+	jetstreamContext jetstream.JetStream,
+	cfg *config.Config,
+) error {
 	createStreamsError := configurator.CreateOrUpdateStreams(
 		requestContext,
 		jetstreamContext,
@@ -180,7 +195,11 @@ func setupJetStream(requestContext context.Context, jetstreamContext jetstream.J
 	return nil
 }
 
-func ensureObjectStore(requestContext context.Context, jetstreamContext jetstream.JetStream, bucket string) error {
+func ensureObjectStore(
+	requestContext context.Context,
+	jetstreamContext jetstream.JetStream,
+	bucket string,
+) error {
 	storeConfig := jetstream.ObjectStoreConfig{
 		Bucket:      bucket,
 		Description: "",
@@ -198,7 +217,11 @@ func ensureObjectStore(requestContext context.Context, jetstreamContext jetstrea
 		if errors.Is(createObjectStoreError, jetstream.ErrBucketExists) {
 			_, lookupStoreError := jetstreamContext.ObjectStore(requestContext, bucket)
 			if lookupStoreError != nil {
-				return fmt.Errorf("failed to access existing object store '%s': %w", bucket, lookupStoreError)
+				return fmt.Errorf(
+					"failed to access existing object store '%s': %w",
+					bucket,
+					lookupStoreError,
+				)
 			}
 
 			return nil
@@ -442,7 +465,13 @@ func initializeWorker(
 	serviceLog *logger.Logger,
 	jetstreamContext jetstream.JetStream,
 ) (*worker.NatsWorker, error) {
-	natsWorker, workerErr := initNATSWorker(requestContext, cfg, mainPipeline, serviceLog, jetstreamContext)
+	natsWorker, workerErr := initNATSWorker(
+		requestContext,
+		cfg,
+		mainPipeline,
+		serviceLog,
+		jetstreamContext,
+	)
 	if workerErr != nil {
 		serviceLog.Error("Failed to initialize NATS worker: %v", workerErr)
 
@@ -475,7 +504,9 @@ func run() error {
 	signalChannel := make(chan os.Signal, 1)
 	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM)
 
-	natsConnection, jetstreamContext, setupComponentsError := configurator.SetupNATSComponents(cfg.ServiceNATS.NATS)
+	natsConnection, jetstreamContext, setupComponentsError := configurator.SetupNATSComponents(
+		cfg.ServiceNATS.NATS,
+	)
 	if setupComponentsError != nil {
 		return fmt.Errorf("setup NATS components: %w", setupComponentsError)
 	}
