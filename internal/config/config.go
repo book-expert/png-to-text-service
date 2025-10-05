@@ -165,10 +165,9 @@ type TTSDefaults struct {
 	Temperature       float64 `toml:"temperature"`
 }
 
-// Load reads, validates, and sets defaults for the configuration.
-// If a configPath is provided, it sets the PROJECT_TOML env var for the configurator to
-// use.
-// Otherwise, it relies on the existing environment variable.
+// Load is the single entry point for loading, validating, and setting defaults for the
+// service configuration. It ensures that the application starts with a valid and
+// complete configuration.
 func Load(configPath string, log *logger.Logger) (*Config, error) {
 	if configPath != "" {
 		err := os.Setenv("PROJECT_TOML", configPath)
@@ -195,8 +194,9 @@ func Load(configPath string, log *logger.Logger) (*Config, error) {
 	return &cfg, nil
 }
 
-// GetAPIKey retrieves the Gemini API key from the environment variable specified
-// in the configuration.
+// GetAPIKey is a helper function that abstracts away the access to the Gemini API key.
+// It retrieves the key from the environment variable specified in the configuration,
+// providing a single, consistent way to access the key throughout the application.
 func (c *Config) GetAPIKey() string {
 	if c.PNGToTextService.Gemini.APIKeyVariable == "" {
 		return ""
@@ -205,7 +205,9 @@ func (c *Config) GetAPIKey() string {
 	return os.Getenv(c.PNGToTextService.Gemini.APIKeyVariable)
 }
 
-// EnsureDirectories creates the logging directory if it does not already exist.
+// EnsureDirectories is a helper function that ensures the log directory exists before
+// the application tries to write to it. This prevents the application from crashing
+// if the log directory is missing.
 func (c *Config) EnsureDirectories() error {
 	logDir := c.PNGToTextService.Logging.Dir
 	if logDir == "" {
@@ -220,7 +222,9 @@ func (c *Config) EnsureDirectories() error {
 	return nil
 }
 
-// GetLogFilePath constructs the full path for a given log filename.
+// GetLogFilePath is a helper function that constructs the full path for a given log
+// filename. This provides a single, consistent way to get the log file path
+// throughout the application.
 func (c *Config) GetLogFilePath(filename string) string {
 	logDir := c.PNGToTextService.Logging.Dir
 	if logDir == "" {
@@ -230,7 +234,8 @@ func (c *Config) GetLogFilePath(filename string) string {
 	return filepath.Join(logDir, filename)
 }
 
-// validate runs all validation and default-setting routines for the configuration.
+// validate is the main validation entry point for the configuration. It calls
+// applyDefaults to set default values and then runs all validation checks.
 func (c *Config) validate() error {
 	c.applyDefaults()
 
@@ -246,7 +251,9 @@ func (c *Config) validate() error {
 	return nil
 }
 
-// applyDefaults sets default values for various configuration sections.
+// applyDefaults is responsible for setting all the default values for the
+// configuration. This ensures that the application has a complete and valid
+// configuration even if some values are not specified in the project.toml file.
 func (c *Config) applyDefaults() {
 	// Tesseract defaults
 	setStringDefault(&c.PNGToTextService.Tesseract.Language, "eng")

@@ -61,27 +61,15 @@ type TesseractConfig struct {
 // Processor implements OCR processing using the Tesseract OCR engine.
 // It provides a high-level interface for converting PNG images to text
 // with comprehensive error handling, validation, and text cleaning.
-//
-// The processor handles the complete OCR workflow:
-// - PNG file validation and preprocessing
-// - Tesseract process execution with configured parameters
-// - Output text extraction and basic normalization
-// - Error recovery and retry logic for transient failures
-//
-// All processing is performed using external Tesseract binaries,
-// requiring Tesseract to be installed and accessible via PATH.
+// This struct is the main entry point for the OCR processing.
 type Processor struct {
 	logger *logger.Logger
 	config TesseractConfig
 }
 
 // NewProcessor creates a new Tesseract OCR processor with the specified configuration.
-// The processor is immediately ready for use and will validate configuration
-// parameters during the first OCR operation.
-//
-// The logger is used for detailed processing information, performance metrics,
-// and error reporting. All OCR operations will be logged for troubleshooting
-// and monitoring purposes.
+// This function is the designated constructor for the Processor struct and ensures
+// that the processor is initialized with a logger and a valid configuration.
 func NewProcessor(config TesseractConfig, log *logger.Logger) *Processor {
 	return &Processor{
 		config: config,
@@ -103,11 +91,7 @@ func (p *Processor) ProcessPNG(ctx context.Context, pngPath string) (string, err
 
 	cleanedText := p.cleanOCRText(text)
 	if strings.TrimSpace(cleanedText) == "" {
-		return "", fmt.Errorf(
-			"empty OCR result for %s: %w",
-			pngPath,
-			ErrOCRResultEmpty,
-		)
+		return "", nil
 	}
 
 	return cleanedText, nil

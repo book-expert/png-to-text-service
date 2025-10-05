@@ -6,58 +6,25 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/book-expert/events"
 	"github.com/book-expert/logger"
+	"github.com/book-expert/png-to-text-service/internal/shared"
 	"github.com/book-expert/prompt-builder/promptbuilder"
 )
 
-var (
-	// ErrImagePathRequired is returned when the image path is empty.
-	ErrImagePathRequired = errors.New("image path is required")
-	// ErrEmptyResponse is returned when the Gemini API returns an empty response.
-	ErrEmptyResponse = errors.New("empty response")
-	// ErrNoCandidates is returned when the Gemini API response contains no candidates.
-	ErrNoCandidates = errors.New("no candidates in response")
-	// ErrGeminiAPIError is returned when the Gemini API returns an error.
-	ErrGeminiAPIError = errors.New("gemini API error")
-	// ErrMaxRetries is returned when the maximum number of retries is exceeded.
-	ErrMaxRetries = errors.New("max retries exceeded")
+const (
+	// MaxFileSize1MB defines the maximum file size allowed for processing in bytes (1MB).
+	MaxFileSize1MB = 1024 * 1024
 )
-
-// MaxFileSize1MB defines the maximum file size allowed for processing in bytes (1MB).
-const MaxFileSize1MB = 1024 * 1024
 
 // SummaryPlacement mirrors the canonical placement type shared across services.
 type SummaryPlacement = events.SummaryPlacement
-
-// AugmentationCommentaryOptions captures commentary specific behaviour.
-type AugmentationCommentaryOptions struct {
-	Enabled         bool   `json:"enabled"`
-	CustomAdditions string `json:"customAdditions"`
-}
-
-// AugmentationSummaryOptions captures summary specific behaviour.
-type AugmentationSummaryOptions struct {
-	Enabled         bool             `json:"enabled"`
-	Placement       SummaryPlacement `json:"placement"`
-	CustomAdditions string           `json:"customAdditions"`
-}
-
-// AugmentationOptions holds options for text augmentation.
-type AugmentationOptions struct {
-	Parameters map[string]any                `json:"parameters"`
-	Commentary AugmentationCommentaryOptions `json:"commentary"`
-	Summary    AugmentationSummaryOptions    `json:"summary"`
-}
 
 // GeminiConfig holds the configuration for the Gemini API client.
 type GeminiConfig struct {
@@ -148,20 +115,21 @@ func NewGeminiProcessor(config *GeminiConfig, log *logger.Logger) *GeminiProcess
 // using the Gemini API, based on the provided image and augmentation options.
 func (g *GeminiProcessor) AugmentTextWithOptions(
 	ctx context.Context,
-	ocrText, imagePath string,
-	opts *AugmentationOptions,
+	ocrText string,
+	pngData []byte,
+	opts *shared.AugmentationOptions,
 ) (string, error) {
-	err := g.validateInputs(ocrText, imagePath)
+	err := g.validateInputs(ocrText, pngData)
 	if err != nil {
 		return "", fmt.Errorf("validate inputs: %w", err)
 	}
 
-    imageData, mimeType, _, err := g.prepareImageData(imagePath)
+    imageData, mimeType, _, err := g.prepareImageData(pngData)
     if err != nil {
         return "", err
     }
 
-	prompt, err := g.buildPromptWithOptions(ocrText, imagePath, opts)
+	prompt, err := g.buildPromptWithOptions(ocrText, pngData, opts)
 	if err != nil {
 		return "", fmt.Errorf("build prompt: %w", err)
 	}
@@ -170,19 +138,21 @@ func (g *GeminiProcessor) AugmentTextWithOptions(
 }
 
 func (g *GeminiProcessor) buildPromptWithOptions(
-	ocrText, imagePath string,
-	opts *AugmentationOptions,
+	ocrText string,
+	pngData []byte,
+	opts *shared.AugmentationOptions,
 ) (string, error) {
 	if g.config.UsePromptBuilder {
-		return g.buildPromptWithBuilder(ocrText, imagePath, opts)
+		return g.buildPromptWithBuilder(ocrText, pngData, opts)
 	}
 
 	return g.buildSimplePrompt(ocrText, opts), nil
 }
 
 func (g *GeminiProcessor) buildPromptWithBuilder(
-    ocrText, imagePath string,
-    opts *AugmentationOptions,
+    ocrText string,
+    pngData []byte,
+    opts *shared.AugmentationOptions,
 ) (string, error) {
 	// 1. Create a FileProcessor with default settings.
 	allowedExtensions := []string{
@@ -198,7 +168,7 @@ func (g *GeminiProcessor) buildPromptWithBuilder(
 
     req := &promptbuilder.BuildRequest{
         Task:          "commentary",
-        Image:         imagePath,
+        Image:         pngData,
         Prompt:        ocrText,
         File:          "",
         SystemMessage: g.composeSystemMessage(opts),
@@ -216,7 +186,7 @@ func (g *GeminiProcessor) buildPromptWithBuilder(
 
 func (g *GeminiProcessor) buildSimplePrompt(
 	ocrText string,
-	opts *AugmentationOptions,
+	opts *shared.AugmentationOptions,
 ) string {
 	var promptParts []string
 
@@ -229,7 +199,7 @@ func (g *GeminiProcessor) buildSimplePrompt(
 	return strings.Join(promptParts, "\n\n")
 }
 
-func (g *GeminiProcessor) composeSystemMessage(opts *AugmentationOptions) string {
+func (g *GeminiProcessor) composeSystemMessage(opts *shared.AugmentationOptions) string {
 	if opts == nil {
 		return ""
 	}
@@ -260,7 +230,7 @@ func (g *GeminiProcessor) composeSystemMessage(opts *AugmentationOptions) string
 	return strings.Join(sections, "\n\n---\n\n")
 }
 
-func (g *GeminiProcessor) composeGuidelines(opts *AugmentationOptions) string {
+func (g *GeminiProcessor) composeGuidelines(opts *shared.AugmentationOptions) string {
 	if opts == nil {
 		return ""
 	}
@@ -298,59 +268,24 @@ func (g *GeminiProcessor) summaryPlacementDirective(placement SummaryPlacement) 
 	}
 }
 
-func (g *GeminiProcessor) validateInputs(_, imagePath string) error {
-	if imagePath == "" {
-		return ErrImagePathRequired
-	}
-
-	_, err := os.Stat(imagePath)
-	if err != nil {
-		return fmt.Errorf("access image file: %w", err)
+func (g *GeminiProcessor) validateInputs(ocrText string, pngData []byte) error {
+	if len(pngData) == 0 {
+		return ErrFileEmpty
 	}
 
 	return nil
 }
 
 func (g *GeminiProcessor) prepareImageData(
-	imagePath string,
+	pngData []byte,
 ) (imageData, mimeType string, imageBytes []byte, err error) {
-	imageData, mimeType, imageBytes, err = g.readAndEncodeImage(imagePath)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("read image: %w", err)
-	}
+	encoded := base64.StdEncoding.EncodeToString(pngData)
+	detectedMimeType := "image/png"
 
-	return imageData, mimeType, imageBytes, nil
+	return encoded, detectedMimeType, pngData, nil
 }
 
-func (g *GeminiProcessor) readAndEncodeImage(
-	imagePath string,
-) (encodedData, mimeType string, imageBytes []byte, err error) {
-	cleanedImagePath := filepath.Clean(imagePath)
 
-	imageBytes, err = os.ReadFile(cleanedImagePath)
-	if err != nil {
-		return "", "", nil, fmt.Errorf("read image file: %w", err)
-	}
-
-	encoded := base64.StdEncoding.EncodeToString(imageBytes)
-	detectedMimeType := g.detectImageMimeType(imagePath)
-
-	return encoded, detectedMimeType, imageBytes, nil
-}
-
-func (g *GeminiProcessor) detectImageMimeType(imagePath string) string {
-	ext := strings.ToLower(filepath.Ext(imagePath))
-	switch ext {
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".webp":
-		return "image/webp"
-	default:
-		return "image/png"
-	}
-}
 
 func (g *GeminiProcessor) tryAllModels(
 	ctx context.Context,

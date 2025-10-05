@@ -9,7 +9,7 @@ import (
 
 	"github.com/book-expert/logger"
 
-	"github.com/book-expert/png-to-text-service/internal/augment"
+	"github.com/book-expert/png-to-text-service/internal/shared"
 )
 
 const (
@@ -25,12 +25,15 @@ type OCRProcessor interface {
 type Augmenter interface {
 	AugmentTextWithOptions(
 		ctx context.Context,
-		text, imagePath string,
-		opts *augment.AugmentationOptions,
+		text string,
+		pngData []byte,
+		opts *shared.AugmentationOptions,
 	) (string, error)
 }
 
 // Pipeline orchestrates the multi-step process of converting a PNG to augmented text.
+// This struct is the main entry point for the png-to-text-service and is responsible
+// for coordinating the OCR and augmentation steps.
 type Pipeline struct {
 	ocr                 OCRProcessor
 	augmenter           Augmenter
@@ -38,17 +41,19 @@ type Pipeline struct {
 	localTmpDir         string
 	keepTempFiles       bool
 	minTextLength       int
-	defaultAugmentation *augment.AugmentationOptions
+	defaultAugmentation *shared.AugmentationOptions
 }
 
 // New creates a new pipeline with all its dependencies.
+// This function is the designated constructor for the Pipeline struct and ensures
+// that the pipeline is initialized with all the necessary components.
 func New(
 	ocr OCRProcessor,
 	augmenter Augmenter,
 	log *logger.Logger,
 	keepTempFiles bool,
 	minTextLength int,
-	augOpts *augment.AugmentationOptions,
+	augOpts *shared.AugmentationOptions,
 ) (*Pipeline, error) {
 	localTmpDir := os.TempDir()
 
@@ -77,7 +82,7 @@ func (p *Pipeline) Process(
     ctx context.Context,
     objectID string,
     pngData []byte,
-	overrides *augment.AugmentationOptions,
+	overrides *shared.AugmentationOptions,
 ) (string, error) {
 	cleanedText, err := p.processPNG(ctx, objectID, pngData)
 	if err != nil {
@@ -101,28 +106,11 @@ func (p *Pipeline) Process(
 		return cleanedText, nil
 	}
 
-	// Create a temporary PNG file for the augmenter to read from.
-	tempImageFile, createTempImageErr := p.createTempFile(pngData)
-	if createTempImageErr != nil {
-		return "", fmt.Errorf("create temp image for '%s': %w", objectID, createTempImageErr)
-	}
-
-	tempImagePath := tempImageFile.Name()
-
-	if !p.keepTempFiles {
-		defer func() {
-			removeTempImageErr := os.Remove(tempImagePath)
-			if removeTempImageErr != nil {
-				p.logger.Error("Failed to remove temp image %s: %v", tempImagePath, removeTempImageErr)
-			}
-		}()
-	}
-
 	// Attempt augmentation; on failure, fall back to the OCR text.
 	augmentedText, augmentErr := p.augmenter.AugmentTextWithOptions(
 		ctx,
 		cleanedText,
-		tempImagePath,
+		pngData,
 		mergedOptions,
 	)
 	if augmentErr != nil {
@@ -170,14 +158,14 @@ func (p *Pipeline) processPNG(ctx context.Context, objectID string, pngData []by
 }
 
 func (p *Pipeline) mergeAugmentationOptions(
-	overrides *augment.AugmentationOptions,
-) *augment.AugmentationOptions {
+	overrides *shared.AugmentationOptions,
+) *shared.AugmentationOptions {
     base := cloneAugmentationOptions(p.defaultAugmentation)
     if base == nil {
-        base = &augment.AugmentationOptions{
+        base = &shared.AugmentationOptions{
             Parameters: nil,
-            Commentary: augment.AugmentationCommentaryOptions{Enabled: false, CustomAdditions: ""},
-            Summary:    augment.AugmentationSummaryOptions{Enabled: false, Placement: "", CustomAdditions: ""},
+            Commentary: shared.AugmentationCommentaryOptions{Enabled: false, CustomAdditions: ""},
+            Summary:    shared.AugmentationSummaryOptions{Enabled: false, Placement: "", CustomAdditions: ""},
         }
     }
 
@@ -206,12 +194,12 @@ func (p *Pipeline) mergeAugmentationOptions(
 	return base
 }
 
-func cloneAugmentationOptions(src *augment.AugmentationOptions) *augment.AugmentationOptions {
+func cloneAugmentationOptions(src *shared.AugmentationOptions) *shared.AugmentationOptions {
 	if src == nil {
 		return nil
 	}
 
-	clone := &augment.AugmentationOptions{
+	clone := &shared.AugmentationOptions{
 		Parameters: cloneParameterMap(src.Parameters),
 		Commentary: src.Commentary,
 		Summary:    src.Summary,
