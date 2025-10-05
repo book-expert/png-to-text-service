@@ -78,5 +78,33 @@ The service will fetch the PNG, OCR + optionally augment, store the text, and pu
 - Race detector: `make test-race`
 - Lint (must be clean): `make lint`
 
+## Architecture Diagram
+
+```mermaid
+graph TD
+    A[PNG-to-Text Service] --> B[NATS JetStream Integration]
+    A --> C[Configuration Loading]
+    A --> D[OCR Processing]
+    A --> E[AI Augmentation]
+    A --> F[Text Cleaning]
+    A --> G[Pipeline Processing]
+    
+    B --> H[Message Consumption]
+    B --> I[Object Store Operations]
+    C --> J[Configurator Integration]
+    D --> K[Tesseract OCR]
+    E --> L[Gemini API]
+    F --> M[Text Cleaning Logic]
+    G --> N[Worker Pool]
+    
+    style A fill:#cde4ff,stroke:#6495ED,stroke-width:2px
+    style B fill:#f9f,stroke:#333,stroke-width:2px
+    style C fill:#fbf,stroke:#333,stroke-width:2px
+    style D fill:#bbf,stroke:#333,stroke-width:2px
+    style E fill:#ddf,stroke:#333,stroke-width:2px
+    style F fill:#ddf,stroke:#333,stroke-width:2px
+    style G fill:#ddf,stroke:#333,stroke-width:2px
+```
+
 ## License
 Distributed under the MIT License. See the LICENSE file for more information.
