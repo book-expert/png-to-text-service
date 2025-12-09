@@ -1,4 +1,4 @@
-# Configuration Package
+ Configuration Package
 
 TOML configuration loading, validation, and management.
 

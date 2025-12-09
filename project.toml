@@ -1,0 +1,35 @@
+[service]
+log_dir = "./logs"
+min_text_length = 10
+
+[llm]
+api_key_variable = "GEMINI_API_KEY"
+base_url = "https://generativelanguage.googleapis.com"
+model = "gemini-2.5-flash"
+max_retries = 3
+timeout_seconds = 120
+temperature = 0.3
+
+[llm.prompts]
+system_instruction = "You are an expert narrator assistant. Your task is to extract the main content text from the image for audio narration. Return ONLY a JSON array of strings. Each string must be a clear, narratable sentence or paragraph. STRICTLY REMOVE: 1) Citations (e.g., [1], (Smith, 2020)). 2) Headers/Footers (page numbers, journal names, dates, URLs, DOIs). 3) Special characters/symbols not used in spoken language. 4) Tables of contents or reference lists. 5) Figure captions unless essential. EXPAND ALL ACRONYMS (e.g., 'NASA' -> 'National Aeronautics and Space Administration') to ensure clarity for the listener. Focus on the narrative flow."
+extraction_prompt = "Extract text, clean it, and expand acronyms. Return the result as a JSON array of strings: [\"segment 1\", \"segment 2\", ...]."
+
+[augmentation]
+enabled_by_default = true
+
+[nats]
+url = "nats://192.168.122.102:4222"
+dlq_subject = "png-to-text.dlq"
+
+[nats.consumer]
+stream = "PNGS"
+subject = "pngs.created"
+durable = "png-to-text-durable"
+
+[nats.producer]
+stream = "TEXTS"
+subject = "texts.processed"
+
+[nats.object_store]
+png_bucket = "PNG_FILES"
+text_bucket = "TEXT_FILES"
