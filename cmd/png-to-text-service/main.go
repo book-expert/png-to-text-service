@@ -29,7 +29,6 @@ func main() {
 }
 
 func run() error {
-	// 1. Load Config
 	// We use a temporary logger for config loading errors
 	tempLog, _ := logger.New("", "")
 	cfg, err := config.Load("project.toml", tempLog)
@@ -37,7 +36,6 @@ func run() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// 2. Setup Logger
 	log, err := logger.New(cfg.Service.LogDir, "png-to-text.log")
 	if err != nil {
 		return fmt.Errorf("setup logger: %w", err)
@@ -50,7 +48,6 @@ func run() error {
 
 	log.Info("Starting PNG-to-Text Service...")
 
-	// 3. Initialize LLM Processor
 	apiKey := cfg.GetAPIKey()
 	if apiKey == "" {
 		return errors.New("LLM API key not found in environment")
@@ -67,14 +64,12 @@ func run() error {
 	}
 	llmProcessor := llm.NewProcessor(llmConfiguration, log)
 
-	// 4. Setup NATS
 	natsConnection, jetStreamContext, err := setupNATS(cfg)
 	if err != nil {
 		return fmt.Errorf("setup nats: %w", err)
 	}
 	defer natsConnection.Close()
 
-	// 5. Initialize and Run Worker
 	// We need to resolve the object stores first
 	pngStore, err := jetStreamContext.ObjectStore(context.Background(), cfg.NATS.ObjectStore.PNGBucket)
 	if err != nil {

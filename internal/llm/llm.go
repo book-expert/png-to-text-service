@@ -40,7 +40,6 @@ type Processor struct {
 // NewProcessor creates a new generic Processor instance using the GenAI SDK.
 func NewProcessor(config *Config, log *logger.Logger) *Processor {
 	ctx := context.Background()
-	// Fix 1: Removed Backend option as it might be default/unnecessary.
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
 		APIKey: config.APIKey,
 	})
@@ -61,13 +60,6 @@ func (processor *Processor) ProcessImage(ctx context.Context, objectID string, i
 		return "", ErrFileEmpty
 	}
 
-	// 1. Upload File
-	// Fix 2: Use UploadFileConfig instead of UploadFileOptions if available, or nil.
-	// Based on error "undefined: genai.UploadFileOptions", let's try passing nil for options first
-	// or construct the UploadFileConfig if I can guess it. 
-    // Actually, the library usually uses *UploadFileConfig.
-    // Let's assume the method signature is Upload(ctx, reader, config).
-    
 	uploadConfig := &genai.UploadFileConfig{
 		DisplayName: fmt.Sprintf("ocr-%s", objectID),
 		MIMEType:    "image/png",
@@ -78,15 +70,12 @@ func (processor *Processor) ProcessImage(ctx context.Context, objectID string, i
 		return "", fmt.Errorf("failed to upload file: %w", err)
 	}
 
-	// Defer deletion
-	// Fix 3: Handle Delete signature: (ctx, name, config) -> (response, error)
 	defer func() {
 		if _, err := processor.client.Files.Delete(context.Background(), file.Name, nil); err != nil {
 			processor.logger.Warn("Failed to delete file %s: %v", file.Name, err)
 		}
 	}()
 
-	// 2. Generate Content
 	var lastErr error
 	for attempt := 1; attempt <= processor.config.MaxRetries; attempt++ {
 		result, err := processor.generateContent(ctx, file)
@@ -111,13 +100,11 @@ func (processor *Processor) ProcessImage(ctx context.Context, objectID string, i
 }
 
 func (processor *Processor) generateContent(ctx context.Context, file *genai.File) (string, error) {
-    // Fix 4: Cast temperature to float32 (pointer)
-    temp := float32(processor.config.Temperature)
-    
+	temp := float32(processor.config.Temperature)
+
 	req := &genai.GenerateContentConfig{
-		// Model field removed (passed as arg)
-		Temperature: &temp,
-		ResponseMIMEType: "application/json", 
+		Temperature:      &temp,
+		ResponseMIMEType: "application/json",
 		SystemInstruction: &genai.Content{
 			Parts: []*genai.Part{
 				{Text: processor.config.SystemInstruction},

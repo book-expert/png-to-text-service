@@ -122,25 +122,21 @@ func (worker *NatsWorker) handleMessage(ctx context.Context, msg jetstream.Msg) 
 }
 
 func (worker *NatsWorker) process(ctx context.Context, event *events.PNGCreatedEvent) error {
-	// 1. Fetch PNG
 	pngData, err := worker.fetchPNG(ctx, event.PNGKey)
 	if err != nil {
 		return err
 	}
 
-	// 2. Process via LLM
 	text, err := worker.llmProcessor.ProcessImage(ctx, event.PNGKey, pngData)
 	if err != nil {
 		return err
 	}
 
-	// 3. Store Result
 	textKey, err := worker.storeText(ctx, event, text)
 	if err != nil {
 		return err
 	}
 
-	// 4. Publish Event
 	return worker.publishEvent(ctx, event, textKey)
 }
 
