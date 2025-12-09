@@ -32,7 +32,7 @@ type NatsWorker struct {
 	jetstream         jetstream.JetStream
 	pngStore          jetstream.ObjectStore
 	textStore         jetstream.ObjectStore
-	llm               LLMProcessor
+	llmProcessor      LLMProcessor
 	logger            *logger.Logger
 	streamName        string
 	subject           string
@@ -43,21 +43,21 @@ type NatsWorker struct {
 
 // New creates a new NatsWorker.
 func New(
-	js jetstream.JetStream,
+	jetStreamContext jetstream.JetStream,
 	streamName, subject, consumer, outputSubject, deadLetterSubject string,
-	llm LLMProcessor,
+	llmProcessor LLMProcessor,
 	log *logger.Logger,
 	pngStore jetstream.ObjectStore,
 	textStore jetstream.ObjectStore,
 ) *NatsWorker {
 	return &NatsWorker{
-		jetstream:         js,
+		jetstream:         jetStreamContext,
 		pngStore:          pngStore,
 		textStore:         textStore,
 		streamName:        streamName,
 		subject:           subject,
 		consumer:          consumer,
-		llm:               llm,
+		llmProcessor:      llmProcessor,
 		logger:            log,
 		outputSubject:     outputSubject,
 		deadLetterSubject: deadLetterSubject,
@@ -65,9 +65,9 @@ func New(
 }
 
 // Start begins the worker's message processing loop.
-func (w *NatsWorker) Start(ctx context.Context) error {
+func (worker *NatsWorker) Start(ctx context.Context) error {
 	// Get the existing consumer
-	consumer, err := w.jetstream.Consumer(ctx, w.streamName, w.consumer)
+	consumer, err := worker.jetstream.Consumer(ctx, worker.streamName, worker.consumer)
 	if err != nil {
 		return fmt.Errorf("get consumer: %w", err)
 	}
@@ -82,76 +82,76 @@ func (w *NatsWorker) Start(ctx context.Context) error {
 			if errors.Is(err, nats.ErrTimeout) {
 				continue
 			}
-			w.logger.Error("Fetch failed: %v", err)
+			worker.logger.Error("Fetch failed: %v", err)
 			continue
 		}
 
 		for msg := range batch.Messages() {
-			w.handleMessage(ctx, msg)
+			worker.handleMessage(ctx, msg)
 		}
 	}
 }
 
-func (w *NatsWorker) handleMessage(ctx context.Context, msg jetstream.Msg) {
+func (worker *NatsWorker) handleMessage(ctx context.Context, msg jetstream.Msg) {
 	var event events.PNGCreatedEvent
 	if err := json.Unmarshal(msg.Data(), &event); err != nil {
-		w.logger.Error("Unmarshal failed: %v", err)
+		worker.logger.Error("Unmarshal failed: %v", err)
 		if ackErr := msg.Ack(); ackErr != nil {
-			w.logger.Error("Ack failed: %v", ackErr)
+			worker.logger.Error("Ack failed: %v", ackErr)
 		}
 		return
 	}
 
-	w.logger.Info("Processing PNG: %s", event.PNGKey)
+	worker.logger.Info("Processing PNG: %s", event.PNGKey)
 	
 	if progErr := msg.InProgress(); progErr != nil {
-		w.logger.Warn("InProgress failed: %v", progErr)
+		worker.logger.Warn("InProgress failed: %v", progErr)
 	}
 
-	if err := w.process(ctx, &event); err != nil {
-		w.logger.Error("Processing failed for %s: %v", event.PNGKey, err)
-		w.handleFailure(ctx, msg)
+	if err := worker.process(ctx, &event); err != nil {
+		worker.logger.Error("Processing failed for %s: %v", event.PNGKey, err)
+		worker.handleFailure(ctx, msg)
 		return
 	}
 
 	if err := msg.Ack(); err != nil {
-		w.logger.Error("Ack failed: %v", err)
+		worker.logger.Error("Ack failed: %v", err)
 	} else {
-		w.logger.Success("Completed: %s", event.PNGKey)
+		worker.logger.Success("Completed: %s", event.PNGKey)
 	}
 }
 
-func (w *NatsWorker) process(ctx context.Context, event *events.PNGCreatedEvent) error {
+func (worker *NatsWorker) process(ctx context.Context, event *events.PNGCreatedEvent) error {
 	// 1. Fetch PNG
-	pngData, err := w.fetchPNG(ctx, event.PNGKey)
+	pngData, err := worker.fetchPNG(ctx, event.PNGKey)
 	if err != nil {
 		return err
 	}
 
 	// 2. Process via LLM
-	text, err := w.llm.ProcessImage(ctx, event.PNGKey, pngData)
+	text, err := worker.llmProcessor.ProcessImage(ctx, event.PNGKey, pngData)
 	if err != nil {
 		return err
 	}
 
 	// 3. Store Result
-	textKey, err := w.storeText(ctx, event, text)
+	textKey, err := worker.storeText(ctx, event, text)
 	if err != nil {
 		return err
 	}
 
 	// 4. Publish Event
-	return w.publishEvent(ctx, event, textKey)
+	return worker.publishEvent(ctx, event, textKey)
 }
 
-func (w *NatsWorker) fetchPNG(ctx context.Context, key string) ([]byte, error) {
-	obj, err := w.pngStore.Get(ctx, key)
+func (worker *NatsWorker) fetchPNG(ctx context.Context, key string) ([]byte, error) {
+	obj, err := worker.pngStore.Get(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("get png: %w", err)
 	}
 	defer func() {
 		if closeErr := obj.Close(); closeErr != nil {
-			w.logger.Warn("failed to close png object: %v", closeErr)
+			worker.logger.Warn("failed to close png object: %v", closeErr)
 		}
 	}()
 
@@ -162,7 +162,7 @@ func (w *NatsWorker) fetchPNG(ctx context.Context, key string) ([]byte, error) {
 	return data, nil
 }
 
-func (w *NatsWorker) storeText(ctx context.Context, event *events.PNGCreatedEvent, text string) (string, error) {
+func (worker *NatsWorker) storeText(ctx context.Context, event *events.PNGCreatedEvent, text string) (string, error) {
 	key := fmt.Sprintf(
 		"%s/%s/text_%s.txt",
 		event.Header.TenantID,
@@ -175,14 +175,14 @@ func (w *NatsWorker) storeText(ctx context.Context, event *events.PNGCreatedEven
 		Description: fmt.Sprintf("Text for %s", event.PNGKey),
 	}
 
-	_, err := w.textStore.Put(ctx, meta, bytes.NewReader([]byte(text)))
+	_, err := worker.textStore.Put(ctx, meta, bytes.NewReader([]byte(text)))
 	if err != nil {
 		return "", fmt.Errorf("store text: %w", err)
 	}
 	return key, nil
 }
 
-func (w *NatsWorker) publishEvent(ctx context.Context, sourceEvent *events.PNGCreatedEvent, textKey string) error {
+func (worker *NatsWorker) publishEvent(ctx context.Context, sourceEvent *events.PNGCreatedEvent, textKey string) error {
 	evt := events.TextProcessedEvent{
 		Header:     sourceEvent.Header,
 		PNGKey:     sourceEvent.PNGKey,
@@ -197,26 +197,26 @@ func (w *NatsWorker) publishEvent(ctx context.Context, sourceEvent *events.PNGCr
 		return fmt.Errorf("marshal event: %w", err)
 	}
 
-	_, err = w.jetstream.Publish(ctx, w.outputSubject, data)
+	_, err = worker.jetstream.Publish(ctx, worker.outputSubject, data)
 	if err != nil {
 		return fmt.Errorf("publish event: %w", err)
 	}
 	return nil
 }
 
-func (w *NatsWorker) handleFailure(ctx context.Context, msg jetstream.Msg) {
-	if w.deadLetterSubject == "" {
+func (worker *NatsWorker) handleFailure(ctx context.Context, msg jetstream.Msg) {
+	if worker.deadLetterSubject == "" {
 		// Allow NATS redelivery if no DLQ is configured
 		if nakErr := msg.Nak(); nakErr != nil {
-			w.logger.Error("Nak failed: %v", nakErr)
+			worker.logger.Error("Nak failed: %v", nakErr)
 		}
 		return
 	}
 
 	for i := 0; i < dlqMaxRetries; i++ {
-		if _, err := w.jetstream.Publish(ctx, w.deadLetterSubject, msg.Data()); err == nil {
+		if _, err := worker.jetstream.Publish(ctx, worker.deadLetterSubject, msg.Data()); err == nil {
 			if ackErr := msg.Ack(); ackErr != nil {
-				w.logger.Error("Ack after DLQ failed: %v", ackErr)
+				worker.logger.Error("Ack after DLQ failed: %v", ackErr)
 			}
 			return
 		}
@@ -225,6 +225,6 @@ func (w *NatsWorker) handleFailure(ctx context.Context, msg jetstream.Msg) {
 
 	// If DLQ fails, NAK to retry later
 	if nakErr := msg.Nak(); nakErr != nil {
-		w.logger.Error("Nak failed after DLQ fail: %v", nakErr)
+		worker.logger.Error("Nak failed after DLQ fail: %v", nakErr)
 	}
 }

@@ -56,9 +56,8 @@ func run() error {
 		return errors.New("LLM API key not found in environment")
 	}
 
-	llmCfg := &llm.Config{
+	llmConfiguration := &llm.Config{
 		APIKey:            apiKey,
-		BaseURL:           cfg.LLM.BaseURL,
 		Model:             cfg.LLM.Model,
 		Temperature:       cfg.LLM.Temperature,
 		TimeoutSeconds:    cfg.LLM.TimeoutSeconds,
@@ -66,34 +65,34 @@ func run() error {
 		SystemInstruction: cfg.LLM.Prompts.SystemInstruction,
 		ExtractionPrompt:  cfg.LLM.Prompts.ExtractionPrompt,
 	}
-	llmProc := llm.NewProcessor(llmCfg, log)
+	llmProcessor := llm.NewProcessor(llmConfiguration, log)
 
 	// 4. Setup NATS
-	nc, js, err := setupNATS(cfg)
+	natsConnection, jetStreamContext, err := setupNATS(cfg)
 	if err != nil {
 		return fmt.Errorf("setup nats: %w", err)
 	}
-	defer nc.Close()
+	defer natsConnection.Close()
 
 	// 5. Initialize and Run Worker
 	// We need to resolve the object stores first
-	pngStore, err := js.ObjectStore(context.Background(), cfg.NATS.ObjectStore.PNGBucket)
+	pngStore, err := jetStreamContext.ObjectStore(context.Background(), cfg.NATS.ObjectStore.PNGBucket)
 	if err != nil {
 		return fmt.Errorf("bind png store: %w", err)
 	}
-	textStore, err := js.ObjectStore(context.Background(), cfg.NATS.ObjectStore.TextBucket)
+	textStore, err := jetStreamContext.ObjectStore(context.Background(), cfg.NATS.ObjectStore.TextBucket)
 	if err != nil {
 		return fmt.Errorf("bind text store: %w", err)
 	}
 
 	w := worker.New(
-		js,
+		jetStreamContext,
 		cfg.NATS.Consumer.Stream,
 		cfg.NATS.Consumer.Subject,
 		cfg.NATS.Consumer.Durable,
 		cfg.NATS.Producer.Subject,
 		cfg.NATS.DLQSubject,
-		llmProc,
+		llmProcessor,
 		log,
 		pngStore,
 		textStore,

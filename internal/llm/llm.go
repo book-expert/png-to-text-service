@@ -22,7 +22,6 @@ var (
 // Config holds the configuration for the LLM client.
 type Config struct {
 	APIKey            string
-	BaseURL           string
 	Model             string
 	Temperature       float64
 	TimeoutSeconds    int
@@ -57,8 +56,8 @@ func NewProcessor(config *Config, log *logger.Logger) *Processor {
 }
 
 // ProcessImage uploads the PNG and sends it to the LLM for text extraction and augmentation.
-func (p *Processor) ProcessImage(ctx context.Context, objectID string, pngData []byte) (string, error) {
-	if len(pngData) == 0 {
+func (processor *Processor) ProcessImage(ctx context.Context, objectID string, imageData []byte) (string, error) {
+	if len(imageData) == 0 {
 		return "", ErrFileEmpty
 	}
 
@@ -74,7 +73,7 @@ func (p *Processor) ProcessImage(ctx context.Context, objectID string, pngData [
 		MIMEType:    "image/png",
 	}
 
-	file, err := p.client.Files.Upload(ctx, bytes.NewReader(pngData), uploadConfig)
+	file, err := processor.client.Files.Upload(ctx, bytes.NewReader(imageData), uploadConfig)
 	if err != nil {
 		return "", fmt.Errorf("failed to upload file: %w", err)
 	}
@@ -82,23 +81,23 @@ func (p *Processor) ProcessImage(ctx context.Context, objectID string, pngData [
 	// Defer deletion
 	// Fix 3: Handle Delete signature: (ctx, name, config) -> (response, error)
 	defer func() {
-		if _, err := p.client.Files.Delete(context.Background(), file.Name, nil); err != nil {
-			p.logger.Warn("Failed to delete file %s: %v", file.Name, err)
+		if _, err := processor.client.Files.Delete(context.Background(), file.Name, nil); err != nil {
+			processor.logger.Warn("Failed to delete file %s: %v", file.Name, err)
 		}
 	}()
 
 	// 2. Generate Content
 	var lastErr error
-	for attempt := 1; attempt <= p.config.MaxRetries; attempt++ {
-		result, err := p.generateContent(ctx, file)
+	for attempt := 1; attempt <= processor.config.MaxRetries; attempt++ {
+		result, err := processor.generateContent(ctx, file)
 		if err == nil && strings.TrimSpace(result) != "" {
 			return result, nil
 		}
 
 		lastErr = err
-		p.logger.Warn("LLM attempt %d/%d failed: %v", attempt, p.config.MaxRetries, err)
+		processor.logger.Warn("LLM attempt %d/%d failed: %v", attempt, processor.config.MaxRetries, err)
 
-		if attempt < p.config.MaxRetries {
+		if attempt < processor.config.MaxRetries {
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
@@ -111,9 +110,9 @@ func (p *Processor) ProcessImage(ctx context.Context, objectID string, pngData [
 	return "", fmt.Errorf("all attempts failed: %w", lastErr)
 }
 
-func (p *Processor) generateContent(ctx context.Context, file *genai.File) (string, error) {
+func (processor *Processor) generateContent(ctx context.Context, file *genai.File) (string, error) {
     // Fix 4: Cast temperature to float32 (pointer)
-    temp := float32(p.config.Temperature)
+    temp := float32(processor.config.Temperature)
     
 	req := &genai.GenerateContentConfig{
 		// Model field removed (passed as arg)
@@ -121,17 +120,17 @@ func (p *Processor) generateContent(ctx context.Context, file *genai.File) (stri
 		ResponseMIMEType: "application/json", 
 		SystemInstruction: &genai.Content{
 			Parts: []*genai.Part{
-				{Text: p.config.SystemInstruction},
+				{Text: processor.config.SystemInstruction},
 			},
 		},
 	}
 
 	parts := []*genai.Part{
 		{FileData: &genai.FileData{FileURI: file.URI, MIMEType: file.MIMEType}},
-		{Text: p.config.ExtractionPrompt},
+		{Text: processor.config.ExtractionPrompt},
 	}
 
-	resp, err := p.client.Models.GenerateContent(ctx, p.config.Model, []*genai.Content{{Parts: parts}}, req)
+	resp, err := processor.client.Models.GenerateContent(ctx, processor.config.Model, []*genai.Content{{Parts: parts}}, req)
 	if err != nil {
 		return "", fmt.Errorf("generate content failed: %w", err)
 	}
@@ -147,7 +146,7 @@ func (p *Processor) generateContent(ctx context.Context, file *genai.File) (stri
 
 	rawText := sb.String()
 	if !isValidJSON(rawText) {
-		p.logger.Warn("Model returned invalid JSON: %s", rawText)
+		processor.logger.Warn("Model returned invalid JSON: %s", rawText)
 	}
 
 	return rawText, nil
