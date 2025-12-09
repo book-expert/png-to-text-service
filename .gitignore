@@ -1,15 +1,23 @@
+# Binaries
 /bin/
-/.idea/
-/.claude/
-/.gitignore
-/.git/
-/test_artifacts/
+main
+*.exe
+*.dll
+
+# Logs and Output
 /logs/
-.gocache/
-.gomodcache/
+/output/
 *.log
 *.tmp
+
+# IDEs
+/.idea/
+/.vscode/
 .DS_Store
-.vscode/
+
+# Go
+.gocache/
+.gomodcache/
 dist/
 build/
+coverage.out
