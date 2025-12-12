@@ -281,6 +281,7 @@ func (w *Worker) publishCompletion(ctx context.Context, src *events.PNGCreatedEv
 		TextKey:    textKey,
 		PageNumber: src.PageNumber,
 		TotalPages: src.TotalPages,
+		Settings:   src.Settings,
 	}
 
 	data, err := json.Marshal(evt)
