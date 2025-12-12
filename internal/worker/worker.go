@@ -25,7 +25,7 @@ const (
 
 // LLMProcessor defines the contract for text extraction.
 type LLMProcessor interface {
-	ProcessImage(ctx context.Context, objectID string, pngData []byte) (string, error)
+	ProcessImage(ctx context.Context, objectID string, pngData []byte, settings events.JobSettings) (string, error)
 }
 
 type Worker struct {
@@ -222,7 +222,7 @@ func (w *Worker) executeWorkflow(ctx context.Context, event *events.PNGCreatedEv
 	}
 
 	// Step 2: LLM Extraction
-	extractedText, err := w.llm.ProcessImage(ctx, event.PNGKey, pngData)
+	extractedText, err := w.llm.ProcessImage(ctx, event.PNGKey, pngData, event.Settings)
 	if err != nil {
 		return fmt.Errorf("llm: %w", err)
 	}
