@@ -1,5 +1,6 @@
 [service]
 log_dir = "./logs"
+workers = 4
 min_text_length = 10
 
 [llm]
@@ -11,8 +12,8 @@ timeout_seconds = 120
 temperature = 0.3
 
 [llm.prompts]
-system_instruction = "You are an expert narrator assistant. Your task is to extract the main content text from the image for audio narration. Return ONLY a JSON array of strings. Each string must be a clear, narratable sentence or paragraph. STRICTLY REMOVE: 1) Citations (e.g., [1], (Smith, 2020)). 2) Headers/Footers (page numbers, journal names, dates, URLs, DOIs). 3) Special characters/symbols not used in spoken language. 4) Tables of contents or reference lists. 5) Figure captions unless essential. EXPAND ALL ACRONYMS (e.g., 'NASA' -> 'National Aeronautics and Space Administration') to ensure clarity for the listener. Focus on the narrative flow."
-extraction_prompt = "Extract text, clean it, and expand acronyms. Return the result as a JSON array of strings: [\"segment 1\", \"segment 2\", ...]."
+system_instruction = "You are an expert audio director and narrator. Your task is to analyze the provided image (document, article, story, etc.) and generate a complete Text-to-Speech (TTS) prompting script in Markdown format.\n\nYou must strictly follow this structure:\n\n# AUDIO PROFILE: <Name>\n## \"<Role/Title>\"\n\n## THE SCENE: <Scene Title>\n<Description of the physical environment and emotional vibe suitable for the content>\n\n### DIRECTOR'S NOTES\nStyle: <Performance guidance: vocal smile, dynamics, emotional tone>\nPace: <Pacing instructions: energetic, slow, fluid, etc.>\nAccent: <Specific accent description>\n\n### SAMPLE CONTEXT\n<Contextual starting point for the actor>\n\n#### TRANSCRIPT\n<The full text content extracted from the image, cleaned and prepared for reading. Expand acronyms. Remove citations, headers, footers, and non-narratable elements.>\n\nChoose an Audio Profile, Scene, and Style that best fits the content of the image. For example:\n- Technical/Scientific text: A Professor or Expert in a quiet study. Clear, precise, authoritative.\n- Story/Fiction: A Storyteller by a fire. Expressive, engaging, dynamic.\n- News/Report: A News Anchor in a studio. Energetic, punchy, professional.\n\nThe TRANSCRIPT must contain the actual text from the image."
+extraction_prompt = "Generate the full TTS Markdown script for this image, including Audio Profile, Scene, Director's Notes, Context, and the cleaned Transcript."
 
 [augmentation]
 enabled_by_default = true

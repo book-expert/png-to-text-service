@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -8,73 +9,85 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
+const DefaultConfigFilename = "project.toml"
+
 type Config struct {
-	Service struct {
-		LogDir string `toml:"log_dir"`
-	} `toml:"service"`
-
-	LLM struct {
-		APIKeyVariable string  `toml:"api_key_variable"`
-		BaseURL        string  `toml:"base_url"`
-		Model          string  `toml:"model"`
-		MaxRetries     int     `toml:"max_retries"`
-		TimeoutSeconds int     `toml:"timeout_seconds"`
-		Temperature    float64 `toml:"temperature"`
-		Prompts        struct {
-			SystemInstruction string `toml:"system_instruction"`
-			ExtractionPrompt  string `toml:"extraction_prompt"`
-		} `toml:"prompts"`
-	} `toml:"llm"`
-
-	NATS struct {
-		URL        string `toml:"url"`
-		DLQSubject string `toml:"dlq_subject"`
-		Consumer   struct {
-			Stream  string `toml:"stream"`
-			Subject string `toml:"subject"`
-			Durable string `toml:"durable"`
-		} `toml:"consumer"`
-		Producer struct {
-			Stream  string `toml:"stream"`
-			Subject string `toml:"subject"`
-		} `toml:"producer"`
-		ObjectStore struct {
-			PNGBucket  string `toml:"png_bucket"`
-			TextBucket string `toml:"text_bucket"`
-		} `toml:"object_store"`
-	} `toml:"nats"`
+	Service ServiceSettings `toml:"service"`
+	LLM     LLMSettings     `toml:"llm"`
+	NATS    NATSSettings    `toml:"nats"`
 }
 
-func Load(path string, log *logger.Logger) (*Config, error) {
-	if path == "" {
-		path = "project.toml"
+type ServiceSettings struct {
+	LogDir  string `toml:"log_dir"`
+	Workers int    `toml:"workers"`
+}
+
+type LLMSettings struct {
+	APIKeyEnvironmentVariable string         `toml:"api_key_variable"`
+	BaseURL                   string         `toml:"base_url"`
+	Model                     string         `toml:"model"`
+	MaxRetries                int            `toml:"max_retries"`
+	TimeoutSeconds            int            `toml:"timeout_seconds"`
+	Temperature               float64        `toml:"temperature"`
+	Prompts                   PromptSettings `toml:"prompts"`
+}
+
+type PromptSettings struct {
+	SystemInstruction string `toml:"system_instruction"`
+	ExtractionPrompt  string `toml:"extraction_prompt"`
+}
+
+type NATSSettings struct {
+	URL         string              `toml:"url"`
+	DLQSubject  string              `toml:"dlq_subject"`
+	Consumer    ConsumerSettings    `toml:"consumer"`
+	Producer    ProducerSettings    `toml:"producer"`
+	ObjectStore ObjectStoreSettings `toml:"object_store"`
+}
+
+type ConsumerSettings struct {
+	Stream  string `toml:"stream"`
+	Subject string `toml:"subject"`
+	Durable string `toml:"durable"`
+}
+
+type ProducerSettings struct {
+	Stream  string `toml:"stream"`
+	Subject string `toml:"subject"`
+}
+
+type ObjectStoreSettings struct {
+	PNGBucket  string `toml:"png_bucket"`
+	TextBucket string `toml:"text_bucket"`
+}
+
+func Load(filePath string, loggerInstance *logger.Logger) (*Config, error) {
+	if filePath == "" {
+		filePath = DefaultConfigFilename
 	}
 
-	file, err := os.Open(path)
+	configFile, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open config file '%s': %w", filePath, err)
 	}
 	defer func() {
-		if closeErr := file.Close(); closeErr != nil {
-			// We can't easily log here as we might not have a logger set up for this specific failure,
-			// or it's just a read handle. But to satisfy lint:
-			if log != nil {
-				log.Warn("failed to close config file: %v", closeErr)
-			}
+		if closeErr := configFile.Close(); closeErr != nil && loggerInstance != nil {
+			// Correct: Using Warnf
+			loggerInstance.Warnf("Failed to close config file: %v", closeErr)
 		}
 	}()
 
-	var cfg Config
-	decoder := toml.NewDecoder(file)
-	if err := decoder.Decode(&cfg); err != nil {
-		return nil, err
+	var configuration Config
+	decoder := toml.NewDecoder(configFile)
+	if err := decoder.Decode(&configuration); err != nil {
+		return nil, fmt.Errorf("failed to decode TOML configuration: %w", err)
 	}
 
-	return &cfg, nil
+	return &configuration, nil
 }
 
 func (c *Config) GetAPIKey() string {
-	return os.Getenv(c.LLM.APIKeyVariable)
+	return os.Getenv(c.LLM.APIKeyEnvironmentVariable)
 }
 
 func (c *Config) GetLogFilePath(filename string) string {

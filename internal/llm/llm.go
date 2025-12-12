@@ -3,7 +3,6 @@ package llm
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,13 +12,16 @@ import (
 	"google.golang.org/genai"
 )
 
-var (
-	ErrFileEmpty    = errors.New("file is empty")
-	ErrLLMAPIError  = errors.New("LLM API error")
-	ErrNoCandidates = errors.New("no candidates in response")
+const (
+	MimeTypePNG = "image/png"
+	RetryDelay  = 2 * time.Second
 )
 
-// Config holds the configuration for the LLM client.
+var (
+	ErrFileEmpty    = errors.New("input file data is empty")
+	ErrNoCandidates = errors.New("no candidates found in LLM response")
+)
+
 type Config struct {
 	APIKey            string
 	Model             string
@@ -30,96 +32,122 @@ type Config struct {
 	ExtractionPrompt  string
 }
 
-// Processor provides methods for interacting with the LLM.
 type Processor struct {
 	client *genai.Client
 	logger *logger.Logger
 	config Config
 }
 
-// NewProcessor creates a new generic Processor instance using the GenAI SDK.
-func NewProcessor(config *Config, log *logger.Logger) *Processor {
-	ctx := context.Background()
+// NewProcessor initializes the client.
+func NewProcessor(ctx context.Context, cfg *Config, log *logger.Logger) (*Processor, error) {
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		APIKey: config.APIKey,
+		APIKey: cfg.APIKey,
 	})
 	if err != nil {
-		log.Fatal("Failed to create GenAI client: %v", err)
+		return nil, fmt.Errorf("failed to create GenAI client: %w", err)
 	}
 
 	return &Processor{
 		client: client,
-		config: *config,
+		config: *cfg,
 		logger: log,
-	}
+	}, nil
 }
 
-// ProcessImage uploads the PNG and sends it to the LLM for text extraction and augmentation.
-func (processor *Processor) ProcessImage(ctx context.Context, objectID string, imageData []byte) (string, error) {
+// ProcessImage uploads, generates, and cleans up.
+func (p *Processor) ProcessImage(ctx context.Context, objectID string, imageData []byte) (string, error) {
 	if len(imageData) == 0 {
 		return "", ErrFileEmpty
 	}
 
+	// 1. Upload
+	uploadedFile, err := p.uploadFile(ctx, objectID, imageData)
+	if err != nil {
+		return "", err
+	}
+
+	// 2. Cleanup Deferral
+	defer p.cleanupFile(uploadedFile.Name)
+
+	// 3. Generate with Retries
+	return p.generateWithRetries(ctx, uploadedFile)
+}
+
+func (p *Processor) uploadFile(ctx context.Context, objectID string, data []byte) (*genai.File, error) {
 	uploadConfig := &genai.UploadFileConfig{
 		DisplayName: fmt.Sprintf("ocr-%s", objectID),
-		MIMEType:    "image/png",
+		MIMEType:    MimeTypePNG,
 	}
 
-	file, err := processor.client.Files.Upload(ctx, bytes.NewReader(imageData), uploadConfig)
+	file, err := p.client.Files.Upload(ctx, bytes.NewReader(data), uploadConfig)
 	if err != nil {
-		return "", fmt.Errorf("failed to upload file: %w", err)
+		return nil, fmt.Errorf("upload failed: %w", err)
 	}
+	return file, nil
+}
 
-	defer func() {
-		if _, err := processor.client.Files.Delete(context.Background(), file.Name, nil); err != nil {
-			processor.logger.Warn("Failed to delete file %s: %v", file.Name, err)
-		}
-	}()
+func (p *Processor) cleanupFile(fileName string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	var lastErr error
-	for attempt := 1; attempt <= processor.config.MaxRetries; attempt++ {
-		result, err := processor.generateContent(ctx, file)
-		if err == nil && strings.TrimSpace(result) != "" {
+	if _, err := p.client.Files.Delete(ctx, fileName, nil); err != nil {
+		p.logger.Warnf(fmt.Sprintf("Failed to delete remote file %s: %v", fileName, err))
+	}
+}
+
+func (p *Processor) generateWithRetries(ctx context.Context, file *genai.File) (string, error) {
+	var lastError error
+
+	for attempt := 1; attempt <= p.config.MaxRetries; attempt++ {
+		result, err := p.callGenAIModel(ctx, file)
+
+		if err == nil {
 			return result, nil
 		}
 
-		lastErr = err
-		processor.logger.Warn("LLM attempt %d/%d failed: %v", attempt, processor.config.MaxRetries, err)
+		lastError = err
+		// TODO: Remove sprintf stuff
+		p.logger.Warnf(fmt.Sprintf("LLM attempt %d/%d failed: %v", attempt, p.config.MaxRetries, err))
 
-		if attempt < processor.config.MaxRetries {
+		if attempt < p.config.MaxRetries {
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
-			case <-time.After(time.Second * 2):
+			case <-time.After(RetryDelay):
 				continue
 			}
 		}
 	}
 
-	return "", fmt.Errorf("all attempts failed: %w", lastErr)
+	return "", fmt.Errorf("all %d attempts failed: %w", p.config.MaxRetries, lastError)
 }
 
-func (processor *Processor) generateContent(ctx context.Context, file *genai.File) (string, error) {
-	temp := float32(processor.config.Temperature)
+func (p *Processor) callGenAIModel(parentCtx context.Context, file *genai.File) (string, error) {
+	ctx, cancel := context.WithTimeout(parentCtx, time.Duration(p.config.TimeoutSeconds)*time.Second)
+	defer cancel()
 
-	req := &genai.GenerateContentConfig{
-		Temperature:      &temp,
-		ResponseMIMEType: "application/json",
-		SystemInstruction: &genai.Content{
-			Parts: []*genai.Part{
-				{Text: processor.config.SystemInstruction},
+	temperature := float32(p.config.Temperature)
+
+	resp, err := p.client.Models.GenerateContent(
+		ctx,
+		p.config.Model,
+		[]*genai.Content{
+			{
+				Parts: []*genai.Part{
+					{FileData: &genai.FileData{FileURI: file.URI, MIMEType: file.MIMEType}},
+					{Text: p.config.ExtractionPrompt},
+				},
 			},
 		},
-	}
-
-	parts := []*genai.Part{
-		{FileData: &genai.FileData{FileURI: file.URI, MIMEType: file.MIMEType}},
-		{Text: processor.config.ExtractionPrompt},
-	}
-
-	resp, err := processor.client.Models.GenerateContent(ctx, processor.config.Model, []*genai.Content{{Parts: parts}}, req)
+		&genai.GenerateContentConfig{
+			Temperature: &temperature,
+			SystemInstruction: &genai.Content{
+				Parts: []*genai.Part{{Text: p.config.SystemInstruction}},
+			},
+		},
+	)
 	if err != nil {
-		return "", fmt.Errorf("generate content failed: %w", err)
+		return "", fmt.Errorf("generation failed: %w", err)
 	}
 
 	if resp == nil || len(resp.Candidates) == 0 {
@@ -131,15 +159,5 @@ func (processor *Processor) generateContent(ctx context.Context, file *genai.Fil
 		sb.WriteString(part.Text)
 	}
 
-	rawText := sb.String()
-	if !isValidJSON(rawText) {
-		processor.logger.Warn("Model returned invalid JSON: %s", rawText)
-	}
-
-	return rawText, nil
-}
-
-func isValidJSON(s string) bool {
-	var js json.RawMessage
-	return json.Unmarshal([]byte(s), &js) == nil
+	return sb.String(), nil
 }

@@ -3,9 +3,7 @@ module github.com/book-expert/png-to-text-service
 go 1.25.1
 
 require (
-	github.com/book-expert/events v0.3.1
-	github.com/book-expert/logger v0.1.3
-	github.com/google/uuid v1.6.0
+	github.com/book-expert/logger v0.1.4
 	github.com/nats-io/nats.go v1.46.1
 	github.com/pelletier/go-toml/v2 v2.2.4
 	google.golang.org/genai v1.38.0
