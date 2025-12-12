@@ -1,6 +1,6 @@
 [service]
 log_dir = "./logs"
-workers = 4
+workers = 5
 min_text_length = 10
 
 [llm]
