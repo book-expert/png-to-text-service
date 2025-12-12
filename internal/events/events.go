@@ -22,19 +22,19 @@ type JobSettings struct {
 
 // PNGCreatedEvent is triggered when a PNG page is generated from a PDF.
 type PNGCreatedEvent struct {
-	Header     EventHeader `json:"header"`
-	PNGKey     string      `json:"png_key"`
-	PageNumber int         `json:"page_number"`
-	TotalPages int         `json:"total_pages"`
-	Settings   JobSettings `json:"settings,omitempty"`
+	Header     EventHeader  `json:"header"`
+	PNGKey     string       `json:"png_key"`
+	PageNumber int          `json:"page_number"`
+	TotalPages int          `json:"total_pages"`
+	Settings   *JobSettings `json:"settings,omitempty"`
 }
 
 // TextProcessedEvent is triggered after text has been extracted from a PNG.
 type TextProcessedEvent struct {
-	Header     EventHeader `json:"header"`
-	PNGKey     string      `json:"png_key"`
-	TextKey    string      `json:"text_key"`
-	PageNumber int         `json:"page_number"`
-	TotalPages int         `json:"total_pages"`
-	Settings   JobSettings `json:"settings,omitempty"`
+	Header     EventHeader  `json:"header"`
+	PNGKey     string       `json:"png_key"`
+	TextKey    string       `json:"text_key"`
+	PageNumber int          `json:"page_number"`
+	TotalPages int          `json:"total_pages"`
+	Settings   *JobSettings `json:"settings,omitempty"`
 }

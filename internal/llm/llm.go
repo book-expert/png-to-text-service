@@ -10,7 +10,7 @@ import (
 
 	"github.com/book-expert/logger"
 	"github.com/book-expert/png-to-text-service/internal/events"
-	"github.com/book-expert/prompt-builder/promptbuilder"
+	"github.com/book-expert/png-to-text-service/internal/promptbuilder"
 	"google.golang.org/genai"
 )
 
@@ -35,10 +35,9 @@ type Config struct {
 }
 
 type Processor struct {
-	client  *genai.Client
-	logger  *logger.Logger
-	config  Config
-	builder *promptbuilder.Builder
+	client *genai.Client
+	logger *logger.Logger
+	config Config
 }
 
 // NewProcessor initializes the client.
@@ -50,26 +49,15 @@ func NewProcessor(ctx context.Context, cfg *Config, log *logger.Logger) (*Proces
 		return nil, fmt.Errorf("failed to create GenAI client: %w", err)
 	}
 
-	// Initialize prompt builder with a dummy file processor as we deal with raw bytes
-	builder := promptbuilder.New(promptbuilder.NewFileProcessor(0, nil))
-
-	// Register basic presets
-	// Note: These could be moved to config or external files later
-	builder.AddSystemPreset("default", cfg.SystemInstruction)
-	builder.AddSystemPreset("academic", "You are an academic researcher. Extract text precisely. Maintain formal tone. Annotate pauses with [short pause] or [medium pause] where commas or periods appear.")
-	builder.AddSystemPreset("storyteller", "You are a dramatic storyteller. Extract text. Add [sigh], [laughing], [whispering] tags where the visual context suggests emotion.")
-	builder.AddSystemPreset("news_anchor", "You are a professional news anchor. Speak clearly and authoritatively. Use [medium pause] between headlines.")
-
 	return &Processor{
-		client:  client,
-		config:  *cfg,
-		logger:  log,
-		builder: builder,
+		client: client,
+		config: *cfg,
+		logger: log,
 	}, nil
 }
 
 // ProcessImage uploads, generates, and cleans up.
-func (p *Processor) ProcessImage(ctx context.Context, objectID string, imageData []byte, settings events.JobSettings) (string, error) {
+func (p *Processor) ProcessImage(ctx context.Context, objectID string, imageData []byte, settings *events.JobSettings) (string, error) {
 	if len(imageData) == 0 {
 		return "", ErrFileEmpty
 	}
@@ -84,48 +72,32 @@ func (p *Processor) ProcessImage(ctx context.Context, objectID string, imageData
 	defer p.cleanupFile(uploadedFile.Name)
 
 	// 3. Build Dynamic Prompt
-	prompt, err := p.buildDynamicPrompt(settings, imageData)
-	if err != nil {
-		return "", err
+	// We generate the System Instruction using the DirectorConfig
+	directorConfig := promptbuilder.DirectorConfig{
+		StyleProfile:       "Standard",
+		Voice:              "Narrator",
+		CustomInstructions: "",
+		Exclusions:         nil,
 	}
+
+	if settings != nil {
+		if settings.StyleProfile != "" {
+			directorConfig.StyleProfile = settings.StyleProfile
+		}
+		if settings.Voice != "" {
+			directorConfig.Voice = settings.Voice
+		}
+		directorConfig.CustomInstructions = settings.CustomInstructions
+		directorConfig.Exclusions = settings.Exclusions
+	}
+
+	systemInstruction := promptbuilder.BuildSystemInstruction(directorConfig)
+	
+	// The user prompt is simple: "Do it." because the System Instruction contains all the logic.
+	userPrompt := "Analyze this page and generate the Director's Script."
 
 	// 4. Generate with Retries
-	return p.generateWithRetries(ctx, uploadedFile, prompt)
-}
-
-func (p *Processor) buildDynamicPrompt(settings events.JobSettings, imageData []byte) (*promptbuilder.Prompt, error) {
-	task := "default"
-	if settings.StyleProfile != "" {
-		task = settings.StyleProfile
-	}
-
-	// Construct User Prompt
-	userPrompt := p.config.ExtractionPrompt
-	if settings.CustomInstructions != "" {
-		userPrompt += "\n\nCustom Instructions:\n" + settings.CustomInstructions
-	}
-
-	// Construct Guidelines from exclusions
-	var guidelines []string
-	if len(settings.Exclusions) > 0 {
-		guidelines = append(guidelines, "STRICTLY EXCLUDE the following elements:")
-		for _, ex := range settings.Exclusions {
-			guidelines = append(guidelines, "- "+ex)
-		}
-	}
-
-	req := &promptbuilder.BuildRequest{
-		Prompt:     userPrompt,
-		Task:       task,
-		Guidelines: strings.Join(guidelines, "\n"),
-		// Image:      imageData, // We send image via File API, not base64 in prompt for now
-	}
-
-	result, err := p.builder.BuildPrompt(req)
-	if err != nil {
-		return nil, err
-	}
-	return result.Prompt, nil
+	return p.generateWithRetries(ctx, uploadedFile, systemInstruction, userPrompt)
 }
 
 func (p *Processor) uploadFile(ctx context.Context, objectID string, data []byte) (*genai.File, error) {
@@ -150,11 +122,11 @@ func (p *Processor) cleanupFile(fileName string) {
 	}
 }
 
-func (p *Processor) generateWithRetries(ctx context.Context, file *genai.File, prompt *promptbuilder.Prompt) (string, error) {
+func (p *Processor) generateWithRetries(ctx context.Context, file *genai.File, systemInstruction string, userPrompt string) (string, error) {
 	var lastError error
 
 	for attempt := 1; attempt <= p.config.MaxRetries; attempt++ {
-		result, err := p.callGenAIModel(ctx, file, prompt)
+		result, err := p.callGenAIModel(ctx, file, systemInstruction, userPrompt)
 
 		if err == nil {
 			return result, nil
@@ -176,17 +148,14 @@ func (p *Processor) generateWithRetries(ctx context.Context, file *genai.File, p
 	return "", fmt.Errorf("all %d attempts failed: %w", p.config.MaxRetries, lastError)
 }
 
-func (p *Processor) callGenAIModel(parentCtx context.Context, file *genai.File, prompt *promptbuilder.Prompt) (string, error) {
+func (p *Processor) callGenAIModel(parentCtx context.Context, file *genai.File, systemInstruction string, userPrompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(parentCtx, time.Duration(p.config.TimeoutSeconds)*time.Second)
 	defer cancel()
 
 	temperature := float32(p.config.Temperature)
 
-	// Combine UserPrompt and Guidelines
-	finalUserPrompt := prompt.UserPrompt
-	if prompt.Guidelines != "" {
-		finalUserPrompt += "\n\n" + prompt.Guidelines
-	}
+	// Ensure we enforce JSON if we wanted structured output, but here we want Markdown.
+	// We rely on the System Instruction to enforce the format.
 
 	resp, err := p.client.Models.GenerateContent(
 		ctx,
@@ -195,14 +164,14 @@ func (p *Processor) callGenAIModel(parentCtx context.Context, file *genai.File, 
 			{
 				Parts: []*genai.Part{
 					{FileData: &genai.FileData{FileURI: file.URI, MIMEType: file.MIMEType}},
-					{Text: finalUserPrompt},
+					{Text: userPrompt},
 				},
 			},
 		},
 		&genai.GenerateContentConfig{
 			Temperature: &temperature,
 			SystemInstruction: &genai.Content{
-				Parts: []*genai.Part{{Text: prompt.SystemMessage}},
+				Parts: []*genai.Part{{Text: systemInstruction}},
 			},
 		},
 	)

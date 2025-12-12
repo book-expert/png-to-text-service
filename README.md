@@ -56,15 +56,17 @@ url = "nats://localhost:4222"
     go run cmd/png-to-text-service/main.go
     ```
 
-## Testing
+## Development
 
-Use the provided integration test script to verify the pipeline against a running NATS server:
-
+To build the service:
 ```bash
-./test_integration.sh
+make build
 ```
 
-This script checks for processed files in the NATS Object Store and downloads the latest results to `./output/` for inspection.
+To run linting:
+```bash
+make lint
+```
 
 ## License
 

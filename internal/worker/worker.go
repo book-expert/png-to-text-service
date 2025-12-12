@@ -25,7 +25,7 @@ const (
 
 // LLMProcessor defines the contract for text extraction.
 type LLMProcessor interface {
-	ProcessImage(ctx context.Context, objectID string, pngData []byte, settings events.JobSettings) (string, error)
+	ProcessImage(ctx context.Context, objectID string, pngData []byte, settings *events.JobSettings) (string, error)
 }
 
 type Worker struct {

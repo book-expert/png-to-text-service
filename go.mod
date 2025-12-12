@@ -7,10 +7,7 @@ require (
 	github.com/nats-io/nats.go v1.46.1
 	github.com/pelletier/go-toml/v2 v2.2.4
 	google.golang.org/genai v1.38.0
-	github.com/book-expert/prompt-builder v0.0.0
 )
-
-replace github.com/book-expert/prompt-builder => ../prompt-builder
 
 require (
 	cloud.google.com/go v0.116.0 // indirect
