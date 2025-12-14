@@ -105,8 +105,8 @@ func newApplication(ctx context.Context) (*Application, error) {
 		Temperature:       cfg.LLM.Temperature,
 		TimeoutSeconds:    cfg.LLM.TimeoutSeconds,
 		MaxRetries:        cfg.LLM.MaxRetries,
-		SystemInstruction: cfg.LLM.Prompts.SystemInstruction,
-		ExtractionPrompt:  cfg.LLM.Prompts.ExtractionPrompt,
+		SystemInstruction: cfg.LLM.SystemInstruction,
+		ExtractionPrompt:  cfg.LLM.ExtractionPrompt,
 	}
 
 	llmProcessor, err := llm.NewProcessor(ctx, llmConfig, appLogger)

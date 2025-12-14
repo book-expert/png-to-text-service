@@ -1,30 +1,27 @@
 # GEMINI.md - PNG to Text Service
 
 ## Service Overview
-This service performs **Optical Character Recognition (OCR)** and **Script Generation** using the Gemini Vision API. It acts as the "Director," converting raw visual pages into structured "Director's Scripts" for audio generation.
+This service is the **Worker** of the pipeline. It uses Gemini Vision to extract text from page images while applying strict exclusion rules and prepending the "Master Directive".
 
 ## Architecture & Data Flow
 1.  **Input**: Listens to NATS JetStream subject `pngs.created`.
-    -   Payload: `PNGCreatedEvent` (contains **JobSettings**).
+    -   Payload: `PNGCreatedEvent` (contains `AudioSessionConfig` with `MasterDirective` + `JobSettings.Exclusions`).
 2.  **Processing**:
-    -   Downloads the PNG from the Object Store (`PNG_FILES`).
-    -   **Prompt Engineering**: Uses `promptbuilder` to construct a system instruction based on `JobSettings.StyleProfile` (e.g., "Academic", "Storyteller") and the "Show Bible" concept.
-    -   **Gemini Vision API**:
-        -   Extracts text.
-        -   Expands acronyms and cleans data.
-        -   **Dynamic Scene Generation**: Writes a custom "Director's Note" and "Scene Description" for *each page* based on its content, while adhering to the high-level Persona.
-    -   Stores the resulting **Director's Script** (with Markdown headers like `# AUDIO PROFILE`) in the Object Store (`TEXT_FILES`).
-3.  **Output**: Publishes events to `texts.processed`.
-    -   Payload: `TextProcessedEvent`.
+    -   **Vision Prompt Construction**: Combines the static `SystemInstruction` (from `project.toml`) with dynamic `Exclusions` (from `JobSettings`) to instruct the model on what to skip (e.g., "Skip References").
+    -   **Extraction**: Calls Gemini Vision 2.5 Flash to extract text.
+    -   **Script Assembly**: Concatenates `MasterDirective` (Header) + `ExtractedText` (Body).
+3.  **Output**: Publishes `TextProcessedEvent`.
+    -   Payload: A "Director's Script" ready for TTS.
 
 ## Configuration
 -   **Config File**: `project.toml`
 -   **Key Settings**:
-    -   `workers`: Parallel processing (Default: 4).
-    -   `llm.model`: Model name (e.g., `gemini-2.0-flash-exp`).
+    -   `system_instruction`: The base persona for the Vision model (OCR).
+    -   `extraction_prompt`: The task instruction.
 
-## Current Status (Dec 12, 2025)
+## Current Status (Dec 13, 2025)
 -   **Health**: ✅ Healthy
--   **Key Features**:
-    -   **Guided Dynamic Generation**: Combines strict high-level personas (for consistency) with dynamic per-page scene descriptions (for engagement).
-    -   **Visual Narration**: Automatically describes charts/graphs in character (e.g., "This figure shows...").
+-   **Features**:
+    -   **Exclusion Logic**: Dynamically injects user-defined exclusions into the Vision prompt.
+    -   **Master Directive**: Propagates the "Director's Vibe" to the final script.
+    -   **Clean Extraction**: Handles tables, code blocks, and artifacts via prompt engineering.

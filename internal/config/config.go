@@ -23,19 +23,16 @@ type ServiceSettings struct {
 }
 
 type LLMSettings struct {
-	APIKeyEnvironmentVariable string         `toml:"api_key_variable"`
-	BaseURL                   string         `toml:"base_url"`
-	Model                     string         `toml:"model"`
-	MaxRetries                int            `toml:"max_retries"`
-	TimeoutSeconds            int            `toml:"timeout_seconds"`
-	Temperature               float64        `toml:"temperature"`
-	Prompts                   PromptSettings `toml:"prompts"`
+	APIKeyEnvironmentVariable string  `toml:"api_key_variable"`
+	BaseURL                   string  `toml:"base_url"`
+	Model                     string  `toml:"model"`
+	MaxRetries                int     `toml:"max_retries"`
+	TimeoutSeconds            int     `toml:"timeout_seconds"`
+	Temperature               float64 `toml:"temperature"`
+	SystemInstruction         string  `toml:"system_instruction"`
+	ExtractionPrompt          string  `toml:"extraction_prompt"`
 }
 
-type PromptSettings struct {
-	SystemInstruction string `toml:"system_instruction"`
-	ExtractionPrompt  string `toml:"extraction_prompt"`
-}
 
 type NATSSettings struct {
 	URL         string              `toml:"url"`

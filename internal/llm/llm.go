@@ -10,7 +10,6 @@ import (
 
 	"github.com/book-expert/logger"
 	"github.com/book-expert/png-to-text-service/internal/events"
-	"github.com/book-expert/png-to-text-service/internal/promptbuilder"
 	"google.golang.org/genai"
 )
 
@@ -71,33 +70,67 @@ func (p *Processor) ProcessImage(ctx context.Context, objectID string, imageData
 	// 2. Cleanup Deferral
 	defer p.cleanupFile(uploadedFile.Name)
 
-	// 3. Build Dynamic Prompt
-	// We generate the System Instruction using the DirectorConfig
-	directorConfig := promptbuilder.DirectorConfig{
-		StyleProfile:       "Standard",
-		Voice:              "Narrator",
-		CustomInstructions: "",
-		Exclusions:         nil,
+	// 3. Prepare Config
+	var audioConfig *events.AudioSessionConfig
+	if settings != nil && settings.AudioSessionConfig != nil {
+		audioConfig = settings.AudioSessionConfig
+	} else {
+		// Fallback: Empty directive if missing
+		p.logger.Warnf("Missing AudioSessionConfig for %s. Using default fallback.", objectID)
+		audioConfig = &events.AudioSessionConfig{
+			MasterDirective: "# SCENE\nDefault professional reading environment.\n\n# DIRECTOR'S NOTES\nArticulation: Clear\nPacing: Standard\n",
+		}
 	}
 
+	// 4. Build Vision Prompt (System Instruction)
+	// We combine the base instruction from config (TOML) with user-defined exclusions.
+	var exclusions string
 	if settings != nil {
-		if settings.StyleProfile != "" {
-			directorConfig.StyleProfile = settings.StyleProfile
-		}
-		if settings.Voice != "" {
-			directorConfig.Voice = settings.Voice
-		}
-		directorConfig.CustomInstructions = settings.CustomInstructions
-		directorConfig.Exclusions = settings.Exclusions
+		exclusions = settings.Exclusions
+	}
+	systemInstruction := p.buildVisionSystemInstruction(exclusions)
+
+	// User prompt: Simple directive to execute the system instruction.
+	// We can use the ExtractionPrompt from TOML if available.
+	userPrompt := p.config.ExtractionPrompt
+	if userPrompt == "" {
+		userPrompt = "Extract the text from this image."
 	}
 
-	systemInstruction := promptbuilder.BuildSystemInstruction(directorConfig)
-	
-	// The user prompt is simple: "Do it." because the System Instruction contains all the logic.
-	userPrompt := "Analyze this page and generate the Director's Script."
+	// 5. Generate with Retries (Extract Text)
+	extractedText, err := p.generateWithRetries(ctx, uploadedFile, systemInstruction, userPrompt)
+	if err != nil {
+		return "", err
+	}
 
-	// 4. Generate with Retries
-	return p.generateWithRetries(ctx, uploadedFile, systemInstruction, userPrompt)
+	// 6. Assemble Final Script (Wrap with Master Directive)
+	finalScript := buildTTSPrompt(audioConfig, extractedText)
+
+	return finalScript, nil
+}
+
+func (p *Processor) buildVisionSystemInstruction(exclusions string) string {
+	// Start with the base instruction from TOML
+	instruction := p.config.SystemInstruction
+
+	// If TOML was empty, fall back to a reasonable default (though TOML should be source of truth)
+	if instruction == "" {
+		instruction = `You are an expert narrator. Extract text cleanly.`
+	}
+
+	// Append dynamic exclusions
+	if exclusions != "" {
+		instruction += "\n\nCRITICAL EXCLUSIONS (Do NOT Read):\n"
+		instruction += exclusions
+		instruction += "\nIf the page consists PRIMARILY of excluded content (like a full References page), output ONLY the string \"[NO_SPEECH]\"."
+	}
+
+	return instruction
+}
+
+// buildTTSPrompt prepends the Master Directive to the extracted text.
+func buildTTSPrompt(config *events.AudioSessionConfig, extractedText string) string {
+	return config.MasterDirective + "\n\n# TRANSCRIPT\n" + extractedText
 }
 
 func (p *Processor) uploadFile(ctx context.Context, objectID string, data []byte) (*genai.File, error) {

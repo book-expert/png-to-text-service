@@ -7,9 +7,9 @@ A lightweight, event-driven microservice that transforms PNG images into narrati
 This service is a key component of a document-to-audio pipeline. It consumes `pngs.created` events from NATS, downloads the corresponding image, and uses the Gemini 2.5 Flash model to:
 
 1.  **Extract** text with high accuracy.
-2.  **Clean** artifacts (citations, headers, footers).
+2.  **Clean** artifacts (citations, headers, footers) based on user-defined exclusion rules.
 3.  **Expand** acronyms and describe visual elements for clarity.
-4.  **Format** the output as a clean JSON array of strings.
+4.  **Format** the output as a cohesive "Director's Script" by prepending the Master Narration Directive.
 
 The result is stored in a NATS Object Store, ready for a Text-to-Speech (TTS) service.
 
