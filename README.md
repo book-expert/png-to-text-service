@@ -23,7 +23,7 @@ The service follows a stateless worker pattern:
 
 ## Prerequisites
 
-*   **Go**: 1.22+
+*   **Go**: 1.25+
 *   **NATS Server**: With JetStream enabled.
 *   **Gemini API Key**: A valid Google AI Studio API key.
 

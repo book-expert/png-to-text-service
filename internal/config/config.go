@@ -33,7 +33,6 @@ type LLMSettings struct {
 	ExtractionPrompt          string  `toml:"extraction_prompt"`
 }
 
-
 type NATSSettings struct {
 	URL         string              `toml:"url"`
 	DLQSubject  string              `toml:"dlq_subject"`

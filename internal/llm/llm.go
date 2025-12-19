@@ -70,25 +70,24 @@ func (p *Processor) ProcessImage(ctx context.Context, objectID string, imageData
 	// 2. Cleanup Deferral
 	defer p.cleanupFile(uploadedFile.Name)
 
-	// 3. Prepare Config
-	var audioConfig *events.AudioSessionConfig
-	if settings != nil && settings.AudioSessionConfig != nil {
-		audioConfig = settings.AudioSessionConfig
-	} else {
-		// Fallback: Empty directive if missing
-		p.logger.Warnf("Missing AudioSessionConfig for %s. Using default fallback.", objectID)
-		audioConfig = &events.AudioSessionConfig{
-			MasterDirective: "# SCENE\nDefault professional reading environment.\n\n# DIRECTOR'S NOTES\nArticulation: Clear\nPacing: Standard\n",
-		}
-	}
-
-	// 4. Build Vision Prompt (System Instruction)
-	// We combine the base instruction from config (TOML) with user-defined exclusions.
-	var exclusions string
+	// 3. Build Vision Prompt (System Instruction)
+	// We combine:
+	// - Base instruction from config (TOML)
+	// - User-defined exclusions (Settings.Exclusions)
+	// - User-defined augmentation (Settings.AugmentationPrompt)
+	// - AI-generated Text Directives (Settings.AudioSessionConfig.TextDirective)
+	var exclusions, augmentation string
 	if settings != nil {
 		exclusions = settings.Exclusions
+		augmentation = settings.AugmentationPrompt
 	}
-	systemInstruction := p.buildVisionSystemInstruction(exclusions)
+
+	var textDirective string
+	if settings != nil && settings.AudioSessionConfig != nil {
+		textDirective = settings.AudioSessionConfig.TextDirective
+	}
+
+	systemInstruction := p.buildVisionSystemInstruction(exclusions, augmentation, textDirective)
 
 	// User prompt: Simple directive to execute the system instruction.
 	// We can use the ExtractionPrompt from TOML if available.
@@ -97,19 +96,17 @@ func (p *Processor) ProcessImage(ctx context.Context, objectID string, imageData
 		userPrompt = "Extract the text from this image."
 	}
 
-	// 5. Generate with Retries (Extract Text)
+	// 4. Generate with Retries (Extract Text)
 	extractedText, err := p.generateWithRetries(ctx, uploadedFile, systemInstruction, userPrompt)
 	if err != nil {
 		return "", err
 	}
 
-	// 6. Assemble Final Script (Wrap with Master Directive)
-	finalScript := buildTTSPrompt(audioConfig, extractedText)
-
-	return finalScript, nil
+	// 5. Return Clean Text (No Headers)
+	return extractedText, nil
 }
 
-func (p *Processor) buildVisionSystemInstruction(exclusions string) string {
+func (p *Processor) buildVisionSystemInstruction(exclusions string, augmentation string, textDirective string) string {
 	// Start with the base instruction from TOML
 	instruction := p.config.SystemInstruction
 
@@ -122,15 +119,27 @@ func (p *Processor) buildVisionSystemInstruction(exclusions string) string {
 	if exclusions != "" {
 		instruction += "\n\nCRITICAL EXCLUSIONS (Do NOT Read):\n"
 		instruction += exclusions
-		instruction += "\nIf the page consists PRIMARILY of excluded content (like a full References page), output ONLY the string \"[NO_SPEECH]\"."
 	}
 
-	return instruction
-}
+	// Append AI-generated structural directives
+	if textDirective != "" {
+		instruction += "\n\nSTRUCTURAL CLEANUP RULES:\n"
+		instruction += textDirective
+	}
 
-// buildTTSPrompt prepends the Master Directive to the extracted text.
-func buildTTSPrompt(config *events.AudioSessionConfig, extractedText string) string {
-	return config.MasterDirective + "\n\n# TRANSCRIPT\n" + extractedText
+	// Append User Augmentation (Descriptive capabilities)
+	if augmentation != "" {
+		instruction += "\n\nNARRATIVE AUGMENTATION REQUEST:\n"
+		instruction += augmentation
+		instruction += "\n\n(Note: You are permitted to insert descriptive text for visuals IF requested above. Mark these clearly as [DESCRIPTION: ...])"
+	} else {
+		// Strict pure transcript mode if no augmentation requested
+		instruction += "\n\nCRITICAL: Output ONLY the spoken text. Do NOT output metadata, headers, scene descriptions, or music cues. The output must be pure transcript."
+	}
+
+	instruction += "\n\nIf the page consists PRIMARILY of excluded content (like a full References page), output ONLY the string \"[NO_SPEECH]\"."
+
+	return instruction
 }
 
 func (p *Processor) uploadFile(ctx context.Context, objectID string, data []byte) (*genai.File, error) {
@@ -187,9 +196,7 @@ func (p *Processor) callGenAIModel(parentCtx context.Context, file *genai.File, 
 
 	temperature := float32(p.config.Temperature)
 
-	// Ensure we enforce JSON if we wanted structured output, but here we want Markdown.
 	// We rely on the System Instruction to enforce the format.
-
 	resp, err := p.client.Models.GenerateContent(
 		ctx,
 		p.config.Model,
