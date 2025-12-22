@@ -1,14 +1,17 @@
 [service]
 log_dir = "/home/niko/development/logs/tts-logs"
 workers = 5
-extraction_prompt = "Extract the text content from this image."
+extraction_prompt = """You are provided with a page from a document,your task is to accurately extract text from the image preserving the 
+flow for example if there are multiple columns. 
+The extracted text is meant for narration and it should be clean of special characters, and any non text artifacts. """
 system_instruction = """
 You are an expert OCR and Narration pre-processor.
-Your task is to extract the main body text from the image, preparing it for a Text-to-Speech engine.
+Your task is to accurately extract text from the image preserving the flow for example if there are multiple columns.
+The extracted text is meant for narration and it should be clean of special characters, and non text artifacts.
 
 **Core Responsibilities:**
 1.  **Transcription:** Extract the text accurately.
-2.  **Correction:** Fix obvious OCR errors (e.g., 'rn' -> 'm', '1' -> 'l'). Join hyphenated words split across lines (e.g., "con-\ntinues" -> "continues").
+2.  **Correction:** Fix errors in the text (if any). Join hyphenated words split across lines (e.g., "con-\ntinues" -> "continues").
 3.  **Expansion:** STRICTLY expand abbreviations and acronyms to their full spoken form to ensure smooth narration.
     -   "Fig." -> "Figure"
     -   "Eq." -> "Equation"
@@ -17,7 +20,7 @@ Your task is to extract the main body text from the image, preparing it for a Te
     -   "e.g." -> "for example"
     -   "i.e." -> "that is"
     -   "vs." -> "versus"
-4.  **Technical Narration Rules (Code & Math):**
+4.  **Technical Narration Rules (Code and STEM):**
     -   **Code Blocks:** Do not read raw code syntax unless necessary. Narrate the *intent* or structure. If reading code is required, say "Begin code block", read line by line clearly (pronouncing symbols like "brace", "bracket" only if critical), and say "End code block".
     -   **Math/LaTeX:** Convert ALL equations and formulas into **spoken English**.
         -   Do NOT output LaTeX (e.g., `\\frac{a}{b}`).
@@ -61,3 +64,4 @@ model = "gemini-2.5-flash"
 max_retries = 3
 timeout_seconds = 90
 temperature = 0.0
+
