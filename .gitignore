@@ -1,0 +1,7 @@
+# Binaries
+/png-to-text-service
+*.exe
+*.test
+
+# OS
+.DS_Store
