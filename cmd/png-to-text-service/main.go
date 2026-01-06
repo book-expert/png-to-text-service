@@ -64,23 +64,23 @@ type Application struct {
 
 func main() {
 	// Create a root context that cancels on system interrupts.
-	ctx, cancel := signal.NotifyContext(
+	rootContext, cancel := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
 		syscall.SIGTERM,
 	)
 	defer cancel()
 
-	if err := runApplication(ctx); err != nil {
+	if err := runApplication(rootContext); err != nil {
 		fmt.Fprintf(os.Stderr, "Fatal application error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 // runApplication orchestrates the startup sequence.
-func runApplication(ctx context.Context) error {
+func runApplication(rootContext context.Context) error {
 	// 1. Initialize Application State
-	app, err := newApplication(ctx)
+	app, err := newApplication(rootContext)
 	if err != nil {
 		return err
 	}
@@ -95,7 +95,7 @@ func runApplication(ctx context.Context) error {
 	// Correct: Using Infof with formatting
 	app.logger.Infof("Worker initializing on subject: %s", app.configuration.NATS.Consumer.Subject)
 
-	if err := app.workerInstance.Start(ctx); err != nil {
+	if err := app.workerInstance.Start(rootContext); err != nil {
 		// Only log if it's not a normal shutdown signal
 		if !errors.Is(err, context.Canceled) {
 			// Correct: Using Errorf
@@ -109,7 +109,7 @@ func runApplication(ctx context.Context) error {
 }
 
 // newApplication handles the complexity of wiring dependencies together.
-func newApplication(ctx context.Context) (*Application, error) {
+func newApplication(rootContext context.Context) (*Application, error) {
 	// 1. Load Configuration
 	discardLogger, _ := logger.New("", "")
 	cfg, err := config.Load(ConfigFileName, discardLogger)
@@ -139,37 +139,38 @@ func newApplication(ctx context.Context) (*Application, error) {
 		ExtractionPrompt:  cfg.LLM.ExtractionPrompt,
 	}
 
-	llmProcessor, err := llm.NewProcessor(ctx, llmConfig, appLogger)
+	llmProcessor, err := llm.NewProcessor(rootContext, llmConfig, appLogger)
 	if err != nil {
 		return nil, fmt.Errorf("setup LLM processor: %w", err)
 	}
 
 	// 4. Setup NATS
-	natsConn, jsContext, err := setupNATS(cfg)
+	natsConnection, jetStream, err := setupNATS(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("setup NATS: %w", err)
 	}
 
 	// 5. Bind Object Stores
-	pngStore, err := jsContext.ObjectStore(context.Background(), cfg.NATS.ObjectStore.PNGBucket)
+	pngStore, err := jetStream.ObjectStore(context.Background(), cfg.NATS.ObjectStore.PNGBucket)
 	if err != nil {
-		natsConn.Close()
+		natsConnection.Close()
 		return nil, fmt.Errorf("bind PNG object store (%s): %w", cfg.NATS.ObjectStore.PNGBucket, err)
 	}
 
-	textStore, err := jsContext.ObjectStore(context.Background(), cfg.NATS.ObjectStore.TextBucket)
+	textStore, err := jetStream.ObjectStore(context.Background(), cfg.NATS.ObjectStore.TextBucket)
 	if err != nil {
-		natsConn.Close()
+		natsConnection.Close()
 		return nil, fmt.Errorf("bind Text object store (%s): %w", cfg.NATS.ObjectStore.TextBucket, err)
 	}
 
 	// 6. Initialize Worker
 	workerInstance := worker.New(
-		jsContext,
+		jetStream,
 		cfg.NATS.Consumer.Stream,
 		cfg.NATS.Consumer.Durable,
 		cfg.NATS.Consumer.Subject,
 		cfg.NATS.Producer.Subject,
+		cfg.NATS.Producer.StartedSubject,
 		llmProcessor,
 		appLogger,
 		pngStore,
@@ -180,11 +181,13 @@ func newApplication(ctx context.Context) (*Application, error) {
 	return &Application{
 		configuration:    cfg,
 		logger:           appLogger,
-		natsConnection:   natsConn,
-		jetStreamContext: jsContext,
+		natsConnection:   natsConnection,
+		jetStreamContext: jetStream,
 		workerInstance:   workerInstance,
 	}, nil
 }
+
+
 
 // cleanup closes open connections and flushes logs.
 func (app *Application) cleanup() {

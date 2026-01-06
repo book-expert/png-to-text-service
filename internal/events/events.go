@@ -76,3 +76,10 @@ type TextProcessedEvent struct {
 	TotalPages int          `json:"TotalPages"`
 	Settings   *JobSettings `json:"Settings,omitempty"`
 }
+
+// ExtractionStartedEvent is triggered when the text extraction process begins for a page.
+type ExtractionStartedEvent struct {
+	Header     EventHeader `json:"Header"`
+	PageNumber int         `json:"PageNumber"`
+	TotalPages int         `json:"TotalPages"`
+}

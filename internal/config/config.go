@@ -78,8 +78,9 @@ type ConsumerSettings struct {
 }
 
 type ProducerSettings struct {
-	Stream  string `toml:"stream"`
-	Subject string `toml:"subject"`
+	Stream         string `toml:"stream"`
+	Subject        string `toml:"subject"`
+	StartedSubject string `toml:"started_subject"`
 }
 
 type ObjectStoreSettings struct {

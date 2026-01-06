@@ -53,6 +53,7 @@ durable = "png-to-text-durable"
 [nats.producer]
 stream = "TEXTS"
 subject = "texts.processed"
+started_subject = "texts.started"
 
 [nats.object_store]
 png_bucket = "PNG_FILES"
