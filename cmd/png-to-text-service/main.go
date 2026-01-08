@@ -150,17 +150,29 @@ func newApplication(rootContext context.Context) (*Application, error) {
 		return nil, fmt.Errorf("setup NATS: %w", err)
 	}
 
-	// 5. Bind Object Stores
+	// 5. Bind Object Stores (Create if missing)
 	pngStore, err := jetStream.ObjectStore(context.Background(), cfg.NATS.ObjectStore.PNGBucket)
 	if err != nil {
-		natsConnection.Close()
-		return nil, fmt.Errorf("bind PNG object store (%s): %w", cfg.NATS.ObjectStore.PNGBucket, err)
+		appLogger.Infof("Object Store '%s' not found, attempting to create...", cfg.NATS.ObjectStore.PNGBucket)
+		pngStore, err = jetStream.CreateObjectStore(context.Background(), jetstream.ObjectStoreConfig{
+			Bucket: cfg.NATS.ObjectStore.PNGBucket,
+		})
+		if err != nil {
+			natsConnection.Close()
+			return nil, fmt.Errorf("failed to create PNG object store (%s): %w", cfg.NATS.ObjectStore.PNGBucket, err)
+		}
 	}
 
 	textStore, err := jetStream.ObjectStore(context.Background(), cfg.NATS.ObjectStore.TextBucket)
 	if err != nil {
-		natsConnection.Close()
-		return nil, fmt.Errorf("bind Text object store (%s): %w", cfg.NATS.ObjectStore.TextBucket, err)
+		appLogger.Infof("Object Store '%s' not found, attempting to create...", cfg.NATS.ObjectStore.TextBucket)
+		textStore, err = jetStream.CreateObjectStore(context.Background(), jetstream.ObjectStoreConfig{
+			Bucket: cfg.NATS.ObjectStore.TextBucket,
+		})
+		if err != nil {
+			natsConnection.Close()
+			return nil, fmt.Errorf("failed to create Text object store (%s): %w", cfg.NATS.ObjectStore.TextBucket, err)
+		}
 	}
 
 	// 6. Initialize Worker
