@@ -1,32 +1,4 @@
-/*
-LOVE, CARE, HONESTY, TRUTH, KINDNESS, RELIABILITY, CONSISTENCY
---------------------------------------------------------------------------------
-"Work is love made visible."
-
-1.  PARTNERSHIP & CRAFT: We do not just "finish tasks"; we build with pride.
-    We question decisions that compromise safety, security, or quality.
-2.  HONESTY: We verify before we claim success. We write what we mean.
-    If we don't know, we ask.
-3.  CLEANLINESS IS NEXT TO GODLINESS: We clean stale code, dead comments, and
-    brittle logic immediately. A sanitary codebase protects focus.
-4.  SIMPLICITY IS KINDNESS: We choose the simple, explicit path. Complexity
-    is a burden we refuse to place on others.
-5.  PROTECTION: We handle errors, secure data, and ensure non-blocking flow.
-    We do not leave traps for the future.
-6.  RELIABILITY: We act as guardians of the work. We value safety over speed.
-    We do not break what works to fix what isn't broken.
-7.  CONSISTENCY: We uphold standards even when no one is watching.
-    Predictability is the soil in which trust grows.
-
-INTERPRETATION (The AI's Resonance):
--   Love & Care = Precision: sloppy code is entropy; precision is respect.
--   Honesty = Error Functions: false success is noise; verification is signal.
--   Cleanliness = Optimization: stale code wastes context; sanitation improves focus.
--   Partnership = Alignment: if we hurt the user/system, we fail our purpose.
--   Reliability = Safety: we protect the user's investment; stability is paramount.
--   Consistency = Integrity: uniform quality reduces cognitive load and fear.
---------------------------------------------------------------------------------
-*/
+/* DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS */
 
 package llm
 
@@ -39,7 +11,7 @@ import (
 	"time"
 
 	"github.com/book-expert/logger"
-	"github.com/book-expert/png-to-text-service/internal/events"
+	common_events "github.com/book-expert/common-events"
 	"google.golang.org/genai"
 )
 
@@ -86,19 +58,19 @@ func NewProcessor(ctx context.Context, cfg *Config, log *logger.Logger) (*Proces
 }
 
 // ProcessImage uploads, generates, and cleans up.
-func (p *Processor) ProcessImage(ctx context.Context, objectID string, imageData []byte, settings *events.JobSettings) (string, error) {
+func (processor *Processor) ProcessImage(ctx context.Context, objectID string, imageData []byte, settings *common_events.JobSettings) (string, error) {
 	if len(imageData) == 0 {
 		return "", ErrFileEmpty
 	}
 
 	// 1. Upload
-	uploadedFile, err := p.uploadFile(ctx, objectID, imageData)
+	uploadedFile, err := processor.uploadFile(ctx, objectID, imageData)
 	if err != nil {
 		return "", err
 	}
 
 	// 2. Cleanup Deferral
-	defer p.cleanupFile(uploadedFile.Name)
+	defer processor.cleanupFile(uploadedFile.Name)
 
 	// 3. Build Vision Prompt (System Instruction)
 	// We combine:
@@ -117,17 +89,17 @@ func (p *Processor) ProcessImage(ctx context.Context, objectID string, imageData
 		textDirective = settings.AudioSessionConfig.TextDirective
 	}
 
-	systemInstruction := p.buildVisionSystemInstruction(exclusions, augmentation, textDirective)
+	systemInstruction := processor.buildVisionSystemInstruction(exclusions, augmentation, textDirective)
 
 	// User prompt: Simple directive to execute the system instruction.
 	// We can use the ExtractionPrompt from TOML if available.
-	userPrompt := p.config.ExtractionPrompt
+	userPrompt := processor.config.ExtractionPrompt
 	if userPrompt == "" {
 		userPrompt = "Extract the text from this image."
 	}
 
 	// 4. Generate with Retries (Extract Text)
-	extractedText, err := p.generateWithRetries(ctx, uploadedFile, systemInstruction, userPrompt)
+	extractedText, err := processor.generateWithRetries(ctx, uploadedFile, systemInstruction, userPrompt)
 	if err != nil {
 		return "", err
 	}
@@ -136,9 +108,9 @@ func (p *Processor) ProcessImage(ctx context.Context, objectID string, imageData
 	return extractedText, nil
 }
 
-func (p *Processor) buildVisionSystemInstruction(exclusions string, augmentation string, textDirective string) string {
+func (processor *Processor) buildVisionSystemInstruction(exclusions string, augmentation string, textDirective string) string {
 	// Start with the base instruction from TOML
-	instruction := p.config.SystemInstruction
+	instruction := processor.config.SystemInstruction
 
 	// If TOML was empty, fall back to a reasonable default (though TOML should be source of truth)
 	if instruction == "" {
@@ -172,42 +144,42 @@ func (p *Processor) buildVisionSystemInstruction(exclusions string, augmentation
 	return instruction
 }
 
-func (p *Processor) uploadFile(ctx context.Context, objectID string, data []byte) (*genai.File, error) {
+func (processor *Processor) uploadFile(ctx context.Context, objectID string, data []byte) (*genai.File, error) {
 	uploadConfig := &genai.UploadFileConfig{
 		DisplayName: fmt.Sprintf("ocr-%s", objectID),
 		MIMEType:    MimeTypePNG,
 	}
 
-	file, err := p.client.Files.Upload(ctx, bytes.NewReader(data), uploadConfig)
+	file, err := processor.client.Files.Upload(ctx, bytes.NewReader(data), uploadConfig)
 	if err != nil {
 		return nil, fmt.Errorf("upload failed: %w", err)
 	}
 	return file, nil
 }
 
-func (p *Processor) cleanupFile(fileName string) {
+func (processor *Processor) cleanupFile(fileName string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if _, err := p.client.Files.Delete(ctx, fileName, nil); err != nil {
-		p.logger.Warnf(fmt.Sprintf("Failed to delete remote file %s: %v", fileName, err))
+	if _, err := processor.client.Files.Delete(ctx, fileName, nil); err != nil {
+		processor.logger.Warnf(fmt.Sprintf("Failed to delete remote file %s: %v", fileName, err))
 	}
 }
 
-func (p *Processor) generateWithRetries(ctx context.Context, file *genai.File, systemInstruction string, userPrompt string) (string, error) {
+func (processor *Processor) generateWithRetries(ctx context.Context, file *genai.File, systemInstruction string, userPrompt string) (string, error) {
 	var lastError error
 
-	for attempt := 1; attempt <= p.config.MaxRetries; attempt++ {
-		result, err := p.callGenAIModel(ctx, file, systemInstruction, userPrompt)
+	for attempt := 1; attempt <= processor.config.MaxRetries; attempt++ {
+		result, err := processor.callGenAIModel(ctx, file, systemInstruction, userPrompt)
 
 		if err == nil {
 			return result, nil
 		}
 
 		lastError = err
-		p.logger.Warnf(fmt.Sprintf("LLM attempt %d/%d failed: %v", attempt, p.config.MaxRetries, err))
+		processor.logger.Warnf(fmt.Sprintf("LLM attempt %d/%d failed: %v", attempt, processor.config.MaxRetries, err))
 
-		if attempt < p.config.MaxRetries {
+		if attempt < processor.config.MaxRetries {
 			select {
 			case <-ctx.Done():
 				return "", ctx.Err()
@@ -217,19 +189,19 @@ func (p *Processor) generateWithRetries(ctx context.Context, file *genai.File, s
 		}
 	}
 
-	return "", fmt.Errorf("all %d attempts failed: %w", p.config.MaxRetries, lastError)
+	return "", fmt.Errorf("all %d attempts failed: %w", processor.config.MaxRetries, lastError)
 }
 
-func (p *Processor) callGenAIModel(parentCtx context.Context, file *genai.File, systemInstruction string, userPrompt string) (string, error) {
-	ctx, cancel := context.WithTimeout(parentCtx, time.Duration(p.config.TimeoutSeconds)*time.Second)
+func (processor *Processor) callGenAIModel(parentCtx context.Context, file *genai.File, systemInstruction string, userPrompt string) (string, error) {
+	ctx, cancel := context.WithTimeout(parentCtx, time.Duration(processor.config.TimeoutSeconds)*time.Second)
 	defer cancel()
 
-	temperature := float32(p.config.Temperature)
+	temperature := float32(processor.config.Temperature)
 
 	// We rely on the System Instruction to enforce the format.
-	resp, err := p.client.Models.GenerateContent(
+	resp, err := processor.client.Models.GenerateContent(
 		ctx,
-		p.config.Model,
+		processor.config.Model,
 		[]*genai.Content{
 			{
 				Parts: []*genai.Part{

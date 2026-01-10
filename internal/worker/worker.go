@@ -1,33 +1,4 @@
-/*
-LOVE, CARE, HONESTY, TRUTH, KINDNESS, RELIABILITY, CONSISTENCY
---------------------------------------------------------------------------------
-"Work is love made visible."
-
-1.  PARTNERSHIP & CRAFT: We do not just "finish tasks"; we build with pride.
-    We question decisions that compromise safety, security, or quality.
-2.  HONESTY: We verify before we claim success. We write what we mean.
-    If we don't know, we ask.
-3.  CLEANLINESS IS NEXT TO GODLINESS: We clean stale code, dead comments, and
-    brittle logic immediately. A sanitary codebase protects focus.
-4.  SIMPLICITY IS KINDNESS: We choose the simple, explicit path. Complexity
-    is a burden we refuse to place on others.
-5.  PROTECTION: We handle errors, secure data, and ensure non-blocking flow.
-    We do not leave traps for the future.
-6.  RELIABILITY: We act as guardians of the work. We value safety over speed.
-    We do not break what works to fix what isn't broken.
-7.  CONSISTENCY: We uphold standards even when no one is watching.
-    Predictability is the soil in which trust grows.
-
-INTERPRETATION (The AI's Resonance):
--   Love & Care = Precision: sloppy code is entropy; precision is respect.
--   Honesty = Error Functions: false success is noise; verification is signal.
--   Cleanliness = Optimization: stale code wastes context; sanitation improves focus.
--   Partnership = Alignment: if we hurt the user/system, we fail our purpose.
--   Reliability = Safety: we protect the user's investment; stability is paramount.
--   Consistency = Integrity: uniform quality reduces cognitive load and fear.
---------------------------------------------------------------------------------
-*/
-
+/* DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS */
 package worker
 
 import (
@@ -40,8 +11,8 @@ import (
 	"strings"
 	"time"
 
+	common_events "github.com/book-expert/common-events"
 	"github.com/book-expert/logger"
-	"github.com/book-expert/png-to-text-service/internal/events"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -55,7 +26,7 @@ const (
 
 // LLMProcessor defines the contract for text extraction.
 type LLMProcessor interface {
-	ProcessImage(ctx context.Context, objectID string, pngData []byte, settings *events.JobSettings) (string, error)
+	ProcessImage(ctx context.Context, objectID string, pngData []byte, settings *common_events.JobSettings) (string, error)
 }
 
 type Worker struct {
@@ -240,15 +211,15 @@ func (worker *Worker) keepAlive(context context.Context, message jetstream.Msg) 
 	}
 }
 
-func (worker *Worker) parseEvent(message jetstream.Msg) (*events.PNGCreatedEvent, error) {
-	var event events.PNGCreatedEvent
+func (worker *Worker) parseEvent(message jetstream.Msg) (*common_events.PNGCreatedEvent, error) {
+	var event common_events.PNGCreatedEvent
 	if err := json.Unmarshal(message.Data(), &event); err != nil {
 		return nil, err
 	}
 	return &event, nil
 }
 
-func (worker *Worker) executeWorkflow(context context.Context, event *events.PNGCreatedEvent) error {
+func (worker *Worker) executeWorkflow(context context.Context, event *common_events.PNGCreatedEvent) error {
 	// Step 0: Publish Extraction Started
 	if err := worker.publishExtractionStarted(context, event); err != nil {
 		worker.logger.Warnf("Failed to publish extraction started event: %v", err)
@@ -291,11 +262,11 @@ func (worker *Worker) downloadPNG(context context.Context, key string) ([]byte, 
 	return io.ReadAll(object)
 }
 
-func (worker *Worker) storeText(context context.Context, event *events.PNGCreatedEvent, content string) (string, error) {
+func (worker *Worker) storeText(context context.Context, event *common_events.PNGCreatedEvent, content string) (string, error) {
 	// Idempotency Fix:
 	// Instead of a random UUID, we derive the text filename from the PNG filename.
-	// Assuming PNGKey is like "tenant/workflow/image.png"
-	// We want "tenant/workflow/image.txt"
+	// PNGKey is expected to be in the format "tenant/workflow/image.png"
+	// We derive the text filename to be "tenant/workflow/image.txt"
 	baseName := strings.TrimSuffix(event.PNGKey, ".png")
 	objectKey := fmt.Sprintf("%s.txt", baseName)
 
@@ -313,18 +284,18 @@ func (worker *Worker) storeText(context context.Context, event *events.PNGCreate
 	return objectKey, nil
 }
 
-func (worker *Worker) publishExtractionStarted(context context.Context, source *events.PNGCreatedEvent) error {
+func (worker *Worker) publishExtractionStarted(context context.Context, source *common_events.PNGCreatedEvent) error {
 	if worker.startedSubject == "" {
 		return nil
 	}
 
-	event := events.ExtractionStartedEvent{
+	extractionStartedEvent := common_events.ExtractionStartedEvent{
 		Header:     source.Header,
 		PageNumber: source.PageNumber,
 		TotalPages: source.TotalPages,
 	}
 
-	data, err := json.Marshal(event)
+	data, err := json.Marshal(extractionStartedEvent)
 	if err != nil {
 		return err
 	}
@@ -333,8 +304,8 @@ func (worker *Worker) publishExtractionStarted(context context.Context, source *
 	return err
 }
 
-func (worker *Worker) publishCompletion(context context.Context, source *events.PNGCreatedEvent, textKey string) error {
-	event := events.TextProcessedEvent{
+func (worker *Worker) publishCompletion(context context.Context, source *common_events.PNGCreatedEvent, textKey string) error {
+	textProcessedEvent := common_events.TextProcessedEvent{
 		Header:     source.Header,
 		PNGKey:     source.PNGKey,
 		TextKey:    textKey,
@@ -343,7 +314,7 @@ func (worker *Worker) publishCompletion(context context.Context, source *events.
 		Settings:   source.Settings,
 	}
 
-	data, err := json.Marshal(event)
+	data, err := json.Marshal(textProcessedEvent)
 	if err != nil {
 		return err
 	}
