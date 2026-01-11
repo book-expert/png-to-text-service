@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/book-expert/logger"
@@ -38,73 +39,73 @@ func main() {
 	)
 	defer cancel()
 
-	if err := run(rootContext); err != nil {
-		logDir := os.Getenv("LOG_DIR")
-		if logDir == "" {
-			logDir = os.TempDir()
+	if executionError := run(rootContext); executionError != nil {
+		logDirectory := os.Getenv("LOG_DIR")
+		if logDirectory == "" {
+			logDirectory = os.TempDir()
 		}
-		exitLogger, loggerErr := logger.New(logDir, LogFileName)
-		if loggerErr == nil {
-			exitLogger.Errorf("Fatal application error: %v", err)
+		exitLogger, loggerError := logger.New(logDirectory, LogFileName)
+		if loggerError == nil {
+			exitLogger.Errorf("Fatal application error: %v", executionError)
 			_ = exitLogger.Close()
 		}
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context) error {
-	application, err := newApplication(ctx)
-	if err != nil {
-		return err
+func run(parentContext context.Context) error {
+	application, applicationError := newApplication(parentContext)
+	if applicationError != nil {
+		return applicationError
 	}
 	defer application.cleanup()
 
 	application.logger.Infof("Starting PNG-to-Text Service...")
-	return application.workerInstance.Start(ctx)
+	return application.workerInstance.Start(parentContext)
 }
 
-func newApplication(ctx context.Context) (*Application, error) {
-	logDir := os.Getenv("LOG_DIR")
-	if logDir == "" {
-		logDir = os.TempDir()
+func newApplication(parentContext context.Context) (*Application, error) {
+	logDirectory := os.Getenv("LOG_DIR")
+	if logDirectory == "" {
+		logDirectory = os.TempDir()
 	}
 
 	// 1. Initial Logger for Config Loading
-	initLogger, _ := logger.New(logDir, LogFileName)
-	configuration, err := config.Load(ConfigFileName, initLogger)
-	if err != nil {
+	initLogger, _ := logger.New(logDirectory, LogFileName)
+	configuration, configLoadError := config.Load(ConfigFileName, initLogger)
+	if configLoadError != nil {
 		_ = initLogger.Close()
-		return nil, err
+		return nil, configLoadError
 	}
 
 	// 2. Final Logger
-	appLogger, err := logger.New(logDir, LogFileName)
-	if err != nil {
+	appLogger, loggerInitError := logger.New(logDirectory, LogFileName)
+	if loggerInitError != nil {
 		_ = initLogger.Close()
-		return nil, err
+		return nil, loggerInitError
 	}
 	_ = initLogger.Close()
 
 	// 3. NATS setup
-	natsConnection, jetStreamContext, err := setupNATS(configuration)
-	if err != nil {
+	natsConnection, jetStreamContext, natsSetupError := setupNATS(configuration)
+	if natsSetupError != nil {
 		_ = appLogger.Close()
-		return nil, err
+		return nil, natsSetupError
 	}
 
 	// 4. Stores
-	pngStore, err := ensureObjectStore(ctx, jetStreamContext, configuration.NATS.ObjectStore.PNGBucket)
-	if err != nil {
+	pngStore, pngStoreError := ensureObjectStore(parentContext, jetStreamContext, configuration.NATS.ObjectStore.PNGBucket)
+	if pngStoreError != nil {
 		natsConnection.Close()
 		_ = appLogger.Close()
-		return nil, err
+		return nil, pngStoreError
 	}
 
-	textStore, err := ensureObjectStore(ctx, jetStreamContext, configuration.NATS.ObjectStore.TextBucket)
-	if err != nil {
+	textStore, textStoreError := ensureObjectStore(parentContext, jetStreamContext, configuration.NATS.ObjectStore.TextBucket)
+	if textStoreError != nil {
 		natsConnection.Close()
 		_ = appLogger.Close()
-		return nil, err
+		return nil, textStoreError
 	}
 
 	// 5. LLM client
@@ -117,11 +118,11 @@ func newApplication(ctx context.Context) (*Application, error) {
 		SystemInstruction: configuration.LLM.SystemInstruction,
 		ExtractionPrompt:  configuration.LLM.ExtractionPrompt,
 	}
-	llmClient, err := llm.NewProcessor(ctx, &llmConfig, appLogger)
-	if err != nil {
+	llmClient, llmInitError := llm.NewProcessor(parentContext, &llmConfig, appLogger)
+	if llmInitError != nil {
 		natsConnection.Close()
 		_ = appLogger.Close()
-		return nil, err
+		return nil, llmInitError
 	}
 
 	// 6. Worker
@@ -148,41 +149,41 @@ func newApplication(ctx context.Context) (*Application, error) {
 	}, nil
 }
 
-func (app *Application) cleanup() {
-	if app.natsConnection != nil {
-		app.natsConnection.Close()
+func (application *Application) cleanup() {
+	if application.natsConnection != nil {
+		application.natsConnection.Close()
 	}
-	if app.logger != nil {
-		_ = app.logger.Close()
+	if application.logger != nil {
+		_ = application.logger.Close()
 	}
 }
 
-func setupNATS(cfg *config.Config) (*nats.Conn, jetstream.JetStream, error) {
-	natsConnection, err := nats.Connect(cfg.NATS.URL)
-	if err != nil {
-		return nil, nil, err
+func setupNATS(configuration *config.Config) (*nats.Conn, jetstream.JetStream, error) {
+	natsConnection, connectionError := nats.Connect(configuration.NATS.URL)
+	if connectionError != nil {
+		return nil, nil, connectionError
 	}
 
-	jetStreamContext, err := jetstream.New(natsConnection)
-	if err != nil {
+	jetStreamContext, jetStreamError := jetstream.New(natsConnection)
+	if jetStreamError != nil {
 		natsConnection.Close()
-		return nil, nil, err
+		return nil, nil, jetStreamError
 	}
 
 	// Ensure the Producer stream exists
-	_, err = jetStreamContext.Stream(context.Background(), cfg.NATS.Producer.Stream)
-	if err != nil {
-		_, createErr := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
-			Name:     cfg.NATS.Producer.Stream,
-			Subjects: []string{cfg.NATS.Producer.Stream + ".*"}, // Catch-all for the stream prefix
+	_, lookupError := jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.Stream)
+	if lookupError != nil {
+		_, createError := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
+			Name:     configuration.NATS.Producer.Stream,
+			Subjects: []string{strings.ToLower(configuration.NATS.Producer.Stream) + ".*"}, // Catch-all for the stream prefix
 			Storage:  jetstream.FileStorage,
 		})
-		if createErr != nil {
+		if createError != nil {
 			// If creation failed, try one more time to get it (in case of a race)
-			_, retryErr := jetStreamContext.Stream(context.Background(), cfg.NATS.Producer.Stream)
-			if retryErr != nil {
+			_, retryError := jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.Stream)
+			if retryError != nil {
 				natsConnection.Close()
-				return nil, nil, createErr
+				return nil, nil, createError
 			}
 		}
 	}
@@ -190,18 +191,20 @@ func setupNATS(cfg *config.Config) (*nats.Conn, jetstream.JetStream, error) {
 	return natsConnection, jetStreamContext, nil
 }
 
-func ensureObjectStore(ctx context.Context, js jetstream.JetStream, bucket string) (jetstream.ObjectStore, error) {
-	store, err := js.ObjectStore(ctx, bucket)
-	if err != nil {
-		store, err = js.CreateObjectStore(ctx, jetstream.ObjectStoreConfig{
+func ensureObjectStore(parentContext context.Context, jetStream jetstream.JetStream, bucket string) (jetstream.ObjectStore, error) {
+	store, lookupError := jetStream.ObjectStore(parentContext, bucket)
+	if lookupError != nil {
+		var createError error
+		store, createError = jetStream.CreateObjectStore(parentContext, jetstream.ObjectStoreConfig{
 			Bucket:  bucket,
 			Storage: jetstream.FileStorage,
 		})
-		if err != nil {
+		if createError != nil {
 			// Try one more time to bind in case of race condition
-			store, err = js.ObjectStore(ctx, bucket)
-			if err != nil {
-				return nil, err
+			var retryError error
+			store, retryError = jetStream.ObjectStore(parentContext, bucket)
+			if retryError != nil {
+				return nil, createError
 			}
 		}
 	}
