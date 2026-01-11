@@ -26,7 +26,7 @@ const (
 
 // LLMProcessor defines the contract for text extraction.
 type LLMProcessor interface {
-	ProcessImage(ctx context.Context, objectID string, pngData []byte, settings *common_events.JobSettings) (string, error)
+	ProcessImage(parentContext context.Context, objectID string, pngData []byte, settings *common_events.JobSettings) (string, error)
 }
 
 type Worker struct {
@@ -74,83 +74,83 @@ func New(
 }
 
 // Start initiates the blocking consumption loop.
-func (worker *Worker) Start(context context.Context) error {
+func (worker *Worker) Start(parentContext context.Context) error {
 	// 1. Create or Update Consumer
-	consumer, err := worker.jetStream.CreateOrUpdateConsumer(context, worker.streamName, jetstream.ConsumerConfig{
+	consumer, consumerError := worker.jetStream.CreateOrUpdateConsumer(parentContext, worker.streamName, jetstream.ConsumerConfig{
 		Durable:       worker.consumerName,
 		FilterSubject: worker.filterSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		MaxDeliver:    5, // Cap retries to prevent infinite loops
 	})
-	if err != nil {
-		return fmt.Errorf("consumer create/bind failed: %w", err)
+	if consumerError != nil {
+		return fmt.Errorf("consumer create/bind failed: %w", consumerError)
 	}
 
 	worker.logger.Infof("Worker online. Stream: %s | Consumer: %s | Workers: %d", worker.streamName, worker.consumerName, worker.workerCount)
 
 	errorChannel := make(chan error, worker.workerCount)
-	for i := 0; i < worker.workerCount; i++ {
-		go func(id int) {
-			errorChannel <- worker.consumeLoop(context, consumer, id)
-		}(i)
+	for index := 0; index < worker.workerCount; index++ {
+		go func(workerID int) {
+			errorChannel <- worker.consumeLoop(parentContext, consumer, workerID)
+		}(index)
 	}
 
 	// Block until context is done or a fatal error occurs in one of the workers
 	select {
-	case <-context.Done():
-		return context.Err()
-	case err := <-errorChannel:
-		return err
+	case <-parentContext.Done():
+		return parentContext.Err()
+	case workerError := <-errorChannel:
+		return workerError
 	}
 }
 
-func (worker *Worker) consumeLoop(context context.Context, consumer jetstream.Consumer, id int) error {
+func (worker *Worker) consumeLoop(parentContext context.Context, consumer jetstream.Consumer, workerID int) error {
 	for {
 		// Fast exit if context canceled before fetch
 		select {
-		case <-context.Done():
-			return context.Err()
+		case <-parentContext.Done():
+			return parentContext.Err()
 		default:
 		}
 
 		// 2. Fetch with context awareness
-		messages, err := consumer.Fetch(FetchBatchSize, jetstream.FetchMaxWait(NatsFetchTimeout))
-		if err != nil {
-			if errors.Is(err, nats.ErrTimeout) {
+		messages, fetchError := consumer.Fetch(FetchBatchSize, jetstream.FetchMaxWait(NatsFetchTimeout))
+		if fetchError != nil {
+			if errors.Is(fetchError, nats.ErrTimeout) {
 				continue
 			}
 			// If context is canceled, Fetch might return an error; check context first
-			if context.Err() != nil {
-				return context.Err()
+			if parentContext.Err() != nil {
+				return parentContext.Err()
 			}
-			worker.logger.Errorf("[Worker %d] Fetch error: %v", id, err)
+			worker.logger.Errorf("[Worker %d] Fetch error: %v", workerID, fetchError)
 			// Backoff slightly on infrastructure failure to prevent tight error loops
 			select {
-			case <-context.Done():
-				return context.Err()
+			case <-parentContext.Done():
+				return parentContext.Err()
 			case <-time.After(1 * time.Second):
 				continue
 			}
 		}
 
 		for message := range messages.Messages() {
-			worker.handleMessage(context, message)
+			worker.handleMessage(parentContext, message)
 		}
 	}
 }
 
-func (worker *Worker) handleMessage(context context.Context, message jetstream.Msg) {
+func (worker *Worker) handleMessage(parentContext context.Context, message jetstream.Msg) {
 	// 1. Signal Liveness (reset the AckWait timer on the server)
 	_ = message.InProgress()
 
 	// Start Keep-Alive (Heartbeat)
 	// Prevents NATS from redelivering the message if processing takes longer than AckWait.
-	stopKeepAlive := worker.keepAlive(context, message)
+	stopKeepAlive := worker.keepAlive(parentContext, message)
 	defer stopKeepAlive()
 
-	event, err := worker.parseEvent(message)
-	if err != nil {
-		worker.logger.Errorf("Malformed event: %v", err)
+	event, parseError := worker.parseEvent(message)
+	if parseError != nil {
+		worker.logger.Errorf("Malformed event: %v", parseError)
 		// Terminate: Poison pill. Do not retry malformed JSON.
 		_ = message.Term()
 		return
@@ -159,8 +159,8 @@ func (worker *Worker) handleMessage(context context.Context, message jetstream.M
 	worker.logger.Infof("Processing: %s (Page %d)", event.PNGKey, event.PageNumber)
 
 	// 2. Execute Logic
-	if err := worker.executeWorkflow(context, event); err != nil {
-		worker.logger.Errorf("Workflow failed [%s]: %v", event.PNGKey, err)
+	if workflowError := worker.executeWorkflow(parentContext, event); workflowError != nil {
+		worker.logger.Errorf("Workflow failed [%s]: %v", event.PNGKey, workflowError)
 
 		// Nak with Delay (Requires NATS Server v2.10+ for optimal behavior).
 		// This tells NATS: "Failed, please redeliver later."
@@ -170,8 +170,8 @@ func (worker *Worker) handleMessage(context context.Context, message jetstream.M
 	}
 
 	// 3. Ack on Success
-	if err := message.Ack(); err != nil {
-		worker.logger.Errorf("Ack failed: %v", err)
+	if acknowledgeError := message.Ack(); acknowledgeError != nil {
+		worker.logger.Errorf("Ack failed: %v", acknowledgeError)
 		// Note: If Ack fails, NATS will redeliver.
 		// Because storeText is idempotent, this is safe.
 	} else {
@@ -182,7 +182,7 @@ func (worker *Worker) handleMessage(context context.Context, message jetstream.M
 // keepAlive starts a background ticker that periodically sends InProgress signals
 // to NATS to prevent the message from being redelivered due to AckWait timeout.
 // It returns a cancellation function that must be called when processing is done.
-func (worker *Worker) keepAlive(context context.Context, message jetstream.Msg) func() {
+func (worker *Worker) keepAlive(parentContext context.Context, message jetstream.Msg) func() {
 	// Send InProgress every 10 seconds.
 	// Ensure this is less than the Consumer's AckWait (default often 30s).
 	ticker := time.NewTicker(10 * time.Second)
@@ -192,15 +192,15 @@ func (worker *Worker) keepAlive(context context.Context, message jetstream.Msg) 
 		defer ticker.Stop()
 		for {
 			select {
-			case <-context.Done():
+			case <-parentContext.Done():
 				return
 			case <-done:
 				return
 			case <-ticker.C:
-				if err := message.InProgress(); err != nil {
+				if inProgressError := message.InProgress(); inProgressError != nil {
 					// If we can't signal progress, the connection might be lost.
 					// We log it but don't abort processing; the main loop handles connection issues.
-					worker.logger.Warnf("Failed to send keep-alive signal: %v", err)
+					worker.logger.Warnf("Failed to send keep-alive signal: %v", inProgressError)
 				}
 			}
 		}
@@ -213,48 +213,48 @@ func (worker *Worker) keepAlive(context context.Context, message jetstream.Msg) 
 
 func (worker *Worker) parseEvent(message jetstream.Msg) (*common_events.PNGCreatedEvent, error) {
 	var event common_events.PNGCreatedEvent
-	if err := json.Unmarshal(message.Data(), &event); err != nil {
-		return nil, err
+	if unmarshalError := json.Unmarshal(message.Data(), &event); unmarshalError != nil {
+		return nil, unmarshalError
 	}
 	return &event, nil
 }
 
-func (worker *Worker) executeWorkflow(context context.Context, event *common_events.PNGCreatedEvent) error {
+func (worker *Worker) executeWorkflow(parentContext context.Context, event *common_events.PNGCreatedEvent) error {
 	// Step 0: Publish Extraction Started
-	if err := worker.publishExtractionStarted(context, event); err != nil {
-		worker.logger.Warnf("Failed to publish extraction started event: %v", err)
+	if startedError := worker.publishExtractionStarted(parentContext, event); startedError != nil {
+		worker.logger.Warnf("Failed to publish extraction started event: %v", startedError)
 	}
 
 	// Step 1: Download
-	pngData, err := worker.downloadPNG(context, event.PNGKey)
-	if err != nil {
-		return fmt.Errorf("download: %w", err)
+	pngData, downloadError := worker.downloadPNG(parentContext, event.PNGKey)
+	if downloadError != nil {
+		return fmt.Errorf("download: %w", downloadError)
 	}
 
 	// Step 2: LLM Extraction
-	extractedText, err := worker.llm.ProcessImage(context, event.PNGKey, pngData, event.Settings)
-	if err != nil {
-		return fmt.Errorf("llm: %w", err)
+	extractedText, llmError := worker.llm.ProcessImage(parentContext, event.PNGKey, pngData, event.Settings)
+	if llmError != nil {
+		return fmt.Errorf("llm: %w", llmError)
 	}
 
 	// Step 3: Store (Idempotent)
-	textKey, err := worker.storeText(context, event, extractedText)
-	if err != nil {
-		return fmt.Errorf("store: %w", err)
+	textKey, storeError := worker.storeText(parentContext, event, extractedText)
+	if storeError != nil {
+		return fmt.Errorf("store: %w", storeError)
 	}
 
 	// Step 4: Publish Next Event
-	if err := worker.publishCompletion(context, event, textKey); err != nil {
-		return fmt.Errorf("publish: %w", err)
+	if completionError := worker.publishCompletion(parentContext, event, textKey); completionError != nil {
+		return fmt.Errorf("publish: %w", completionError)
 	}
 
 	return nil
 }
 
-func (worker *Worker) downloadPNG(context context.Context, key string) ([]byte, error) {
-	object, err := worker.pngStore.Get(context, key)
-	if err != nil {
-		return nil, err
+func (worker *Worker) downloadPNG(parentContext context.Context, key string) ([]byte, error) {
+	object, getError := worker.pngStore.Get(parentContext, key)
+	if getError != nil {
+		return nil, getError
 	}
 	// Explicitly ignore close error on read-only object handles if read was successful
 	defer func() { _ = object.Close() }()
@@ -262,7 +262,7 @@ func (worker *Worker) downloadPNG(context context.Context, key string) ([]byte, 
 	return io.ReadAll(object)
 }
 
-func (worker *Worker) storeText(context context.Context, event *common_events.PNGCreatedEvent, content string) (string, error) {
+func (worker *Worker) storeText(parentContext context.Context, event *common_events.PNGCreatedEvent, content string) (string, error) {
 	// Idempotency Fix:
 	// Instead of a random UUID, we derive the text filename from the PNG filename.
 	// PNGKey is expected to be in the format "tenant/workflow/image.png"
@@ -277,14 +277,14 @@ func (worker *Worker) storeText(context context.Context, event *common_events.PN
 
 	// Put is atomic. If this overwrites an existing file from a previous retry,
 	// the state remains consistent (Success).
-	_, err := worker.textStore.Put(context, metadata, bytes.NewReader([]byte(content)))
-	if err != nil {
-		return "", err
+	_, putError := worker.textStore.Put(parentContext, metadata, bytes.NewReader([]byte(content)))
+	if putError != nil {
+		return "", putError
 	}
 	return objectKey, nil
 }
 
-func (worker *Worker) publishExtractionStarted(context context.Context, source *common_events.PNGCreatedEvent) error {
+func (worker *Worker) publishExtractionStarted(parentContext context.Context, source *common_events.PNGCreatedEvent) error {
 	if worker.startedSubject == "" {
 		return nil
 	}
@@ -295,16 +295,16 @@ func (worker *Worker) publishExtractionStarted(context context.Context, source *
 		TotalPages: source.TotalPages,
 	}
 
-	data, err := json.Marshal(extractionStartedEvent)
-	if err != nil {
-		return err
+	data, marshalError := json.Marshal(extractionStartedEvent)
+	if marshalError != nil {
+		return marshalError
 	}
 
-	_, err = worker.jetStream.Publish(context, worker.startedSubject, data)
-	return err
+	_, publishError := worker.jetStream.Publish(parentContext, worker.startedSubject, data)
+	return publishError
 }
 
-func (worker *Worker) publishCompletion(context context.Context, source *common_events.PNGCreatedEvent, textKey string) error {
+func (worker *Worker) publishCompletion(parentContext context.Context, source *common_events.PNGCreatedEvent, textKey string) error {
 	textProcessedEvent := common_events.TextProcessedEvent{
 		Header:     source.Header,
 		PNGKey:     source.PNGKey,
@@ -314,12 +314,12 @@ func (worker *Worker) publishCompletion(context context.Context, source *common_
 		Settings:   source.Settings,
 	}
 
-	data, err := json.Marshal(textProcessedEvent)
-	if err != nil {
-		return err
+	data, marshalError := json.Marshal(textProcessedEvent)
+	if marshalError != nil {
+		return marshalError
 	}
 
 	// Ensure atomic publish
-	_, err = worker.jetStream.Publish(context, worker.producerSubject, data)
-	return err
+	_, publishError := worker.jetStream.Publish(parentContext, worker.producerSubject, data)
+	return publishError
 }

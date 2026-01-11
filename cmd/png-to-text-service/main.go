@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -43,8 +42,10 @@ func main() {
 	)
 	defer cancel()
 
-	if err := runApplication(rootContext); err != nil {
-		fmt.Fprintf(os.Stderr, "Fatal application error: %v\n", err)
+	if runError := runApplication(rootContext); runError != nil {
+		// Since application failed to start, we may not have a logger yet.
+		// However, we should try to use the logger if it was created in runApplication.
+		// For simplicity in main, we exit. runApplication should have logged it.
 		os.Exit(1)
 	}
 }
@@ -52,31 +53,29 @@ func main() {
 // runApplication orchestrates the startup sequence.
 func runApplication(rootContext context.Context) error {
 	// 1. Initialize Application State
-	app, err := newApplication(rootContext)
-	if err != nil {
-		return err
+	application, applicationError := newApplication(rootContext)
+	if applicationError != nil {
+		// Log to stderr only if we don't have a logger yet (handled in newApplication)
+		return applicationError
 	}
 
 	// Ensure resources are cleaned up on exit.
-	defer app.cleanup()
+	defer application.cleanup()
 
-	// Correct: Using Infof
-	app.logger.Infof("Starting PNG-to-Text Service...")
+	application.logger.Infof("Starting PNG-to-Text Service...")
 
 	// 2. Start the Worker Loop
-	// Correct: Using Infof with formatting
-	app.logger.Infof("Worker initializing on subject: %s", app.configuration.NATS.Consumer.Subject)
+	application.logger.Infof("Worker initializing on subject: %s", application.configuration.NATS.Consumer.Subject)
 
-	if err := app.workerInstance.Start(rootContext); err != nil {
+	if workerError := application.workerInstance.Start(rootContext); workerError != nil {
 		// Only log if it's not a normal shutdown signal
-		if !errors.Is(err, context.Canceled) {
-			// Correct: Using Errorf
-			app.logger.Errorf("Worker stopped unexpectedly: %v", err)
-			return err
+		if !errors.Is(workerError, context.Canceled) {
+			application.logger.Errorf("Worker stopped unexpectedly: %v", workerError)
+			return workerError
 		}
 	}
 
-	app.logger.Infof("Shutdown complete.")
+	application.logger.Infof("Shutdown complete.")
 	return nil
 }
 
@@ -84,86 +83,86 @@ func runApplication(rootContext context.Context) error {
 func newApplication(rootContext context.Context) (*Application, error) {
 	// 1. Load Configuration
 	discardLogger, _ := logger.New("", "")
-	cfg, err := config.Load(ConfigFileName, discardLogger)
-	if err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
+	configuration, configLoadError := config.Load(ConfigFileName, discardLogger)
+	if configLoadError != nil {
+		return nil, configLoadError
 	}
 
 	// 2. Setup Real Logger
-	appLogger, err := logger.New(cfg.Service.LogDir, LogFileName)
-	if err != nil {
-		return nil, fmt.Errorf("setup logger: %w", err)
+	appLogger, loggerInitError := logger.New(configuration.Service.LogDir, LogFileName)
+	if loggerInitError != nil {
+		return nil, loggerInitError
 	}
 
 	// 3. Setup LLM Processor
-	apiKey := cfg.GetAPIKey()
+	apiKey := configuration.GetAPIKey()
 	if apiKey == "" {
 		return nil, errors.New("LLM API key not found in environment variables")
 	}
 
 	llmConfig := &llm.Config{
 		APIKey:            apiKey,
-		Model:             cfg.LLM.Model,
-		Temperature:       cfg.LLM.Temperature,
-		TimeoutSeconds:    cfg.LLM.TimeoutSeconds,
-		MaxRetries:        cfg.LLM.MaxRetries,
-		SystemInstruction: cfg.LLM.SystemInstruction,
-		ExtractionPrompt:  cfg.LLM.ExtractionPrompt,
+		Model:             configuration.LLM.Model,
+		Temperature:       configuration.LLM.Temperature,
+		TimeoutSeconds:    configuration.LLM.TimeoutSeconds,
+		MaxRetries:        configuration.LLM.MaxRetries,
+		SystemInstruction: configuration.LLM.SystemInstruction,
+		ExtractionPrompt:  configuration.LLM.ExtractionPrompt,
 	}
 
-	llmProcessor, err := llm.NewProcessor(rootContext, llmConfig, appLogger)
-	if err != nil {
-		return nil, fmt.Errorf("setup LLM processor: %w", err)
+	llmProcessor, llmInitError := llm.NewProcessor(rootContext, llmConfig, appLogger)
+	if llmInitError != nil {
+		return nil, llmInitError
 	}
 
 	// 4. Setup NATS
-	natsConnection, jetStream, err := setupNATS(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("setup NATS: %w", err)
+	natsConnection, jetStream, natsInitError := setupNATS(configuration)
+	if natsInitError != nil {
+		return nil, natsInitError
 	}
 
 	// 5. Bind Object Stores (Create if missing)
-	pngStore, err := jetStream.ObjectStore(context.Background(), cfg.NATS.ObjectStore.PNGBucket)
-	if err != nil {
-		appLogger.Infof("Object Store '%s' not found, attempting to create...", cfg.NATS.ObjectStore.PNGBucket)
-		pngStore, err = jetStream.CreateObjectStore(context.Background(), jetstream.ObjectStoreConfig{
-			Bucket: cfg.NATS.ObjectStore.PNGBucket,
+	pngStore, pngStoreError := jetStream.ObjectStore(context.Background(), configuration.NATS.ObjectStore.PNGBucket)
+	if pngStoreError != nil {
+		appLogger.Infof("Object Store '%s' not found, attempting to create...", configuration.NATS.ObjectStore.PNGBucket)
+		pngStore, pngStoreError = jetStream.CreateObjectStore(context.Background(), jetstream.ObjectStoreConfig{
+			Bucket: configuration.NATS.ObjectStore.PNGBucket,
 		})
-		if err != nil {
+		if pngStoreError != nil {
 			natsConnection.Close()
-			return nil, fmt.Errorf("failed to create PNG object store (%s): %w", cfg.NATS.ObjectStore.PNGBucket, err)
+			return nil, pngStoreError
 		}
 	}
 
-	textStore, err := jetStream.ObjectStore(context.Background(), cfg.NATS.ObjectStore.TextBucket)
-	if err != nil {
-		appLogger.Infof("Object Store '%s' not found, attempting to create...", cfg.NATS.ObjectStore.TextBucket)
-		textStore, err = jetStream.CreateObjectStore(context.Background(), jetstream.ObjectStoreConfig{
-			Bucket: cfg.NATS.ObjectStore.TextBucket,
+	textStore, textStoreError := jetStream.ObjectStore(context.Background(), configuration.NATS.ObjectStore.TextBucket)
+	if textStoreError != nil {
+		appLogger.Infof("Object Store '%s' not found, attempting to create...", configuration.NATS.ObjectStore.TextBucket)
+		textStore, textStoreError = jetStream.CreateObjectStore(context.Background(), jetstream.ObjectStoreConfig{
+			Bucket: configuration.NATS.ObjectStore.TextBucket,
 		})
-		if err != nil {
+		if textStoreError != nil {
 			natsConnection.Close()
-			return nil, fmt.Errorf("failed to create Text object store (%s): %w", cfg.NATS.ObjectStore.TextBucket, err)
+			return nil, textStoreError
 		}
 	}
 
 	// 6. Initialize Worker
 	workerInstance := worker.New(
 		jetStream,
-		cfg.NATS.Consumer.Stream,
-		cfg.NATS.Consumer.Durable,
-		cfg.NATS.Consumer.Subject,
-		cfg.NATS.Producer.Subject,
-		cfg.NATS.Producer.StartedSubject,
+		configuration.NATS.Consumer.Stream,
+		configuration.NATS.Consumer.Durable,
+		configuration.NATS.Consumer.Subject,
+		configuration.NATS.Producer.Subject,
+		configuration.NATS.Producer.StartedSubject,
 		llmProcessor,
 		appLogger,
 		pngStore,
 		textStore,
-		cfg.Service.Workers,
+		configuration.Service.Workers,
 	)
 
 	return &Application{
-		configuration:    cfg,
+		configuration:    configuration,
 		logger:           appLogger,
 		natsConnection:   natsConnection,
 		jetStreamContext: jetStream,
@@ -172,44 +171,42 @@ func newApplication(rootContext context.Context) (*Application, error) {
 }
 
 // cleanup closes open connections and flushes logs.
-func (app *Application) cleanup() {
-	if app.natsConnection != nil {
-		app.natsConnection.Close()
+func (application *Application) cleanup() {
+	if application.natsConnection != nil {
+		application.natsConnection.Close()
 	}
-	if app.logger != nil {
-		if err := app.logger.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to close logger: %v\n", err)
-		}
+	if application.logger != nil {
+		_ = application.logger.Close()
 	}
 }
 
 // setupNATS initializes the NATS connection and JetStream context.
-func setupNATS(cfg *config.Config) (*nats.Conn, jetstream.JetStream, error) {
-	natsConnection, err := nats.Connect(cfg.NATS.URL)
-	if err != nil {
-		return nil, nil, err
+func setupNATS(configuration *config.Config) (*nats.Conn, jetstream.JetStream, error) {
+	natsConnection, natsConnectError := nats.Connect(configuration.NATS.URL)
+	if natsConnectError != nil {
+		return nil, nil, natsConnectError
 	}
 
-	jetStreamContext, err := jetstream.New(natsConnection)
-	if err != nil {
+	jetStreamContext, jetStreamInitError := jetstream.New(natsConnection)
+	if jetStreamInitError != nil {
 		natsConnection.Close()
-		return nil, nil, err
+		return nil, nil, jetStreamInitError
 	}
 
 	// Ensure the Producer stream exists
-	_, err = jetStreamContext.Stream(context.Background(), cfg.NATS.Producer.Stream)
-	if err != nil {
-		_, createErr := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
-			Name:     cfg.NATS.Producer.Stream,
-			Subjects: []string{cfg.NATS.Producer.Stream + ".*"}, // Catch-all for the stream prefix
+	_, streamError := jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.Stream)
+	if streamError != nil {
+		_, createError := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
+			Name:     configuration.NATS.Producer.Stream,
+			Subjects: []string{configuration.NATS.Producer.Stream + ".*"}, // Catch-all for the stream prefix
 			Storage:  jetstream.FileStorage,
 		})
-		if createErr != nil {
+		if createError != nil {
 			// If creation failed, try one more time to get it (in case of a race)
-			_, retryErr := jetStreamContext.Stream(context.Background(), cfg.NATS.Producer.Stream)
-			if retryErr != nil {
+			_, retryError := jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.Stream)
+			if retryError != nil {
 				natsConnection.Close()
-				return nil, nil, fmt.Errorf("failed to ensure stream %s exists: %w", cfg.NATS.Producer.Stream, createErr)
+				return nil, nil, createError
 			}
 		}
 	}

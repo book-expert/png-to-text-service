@@ -65,30 +65,29 @@ func Load(filePath string, loggerInstance *logger.Logger) (*Config, error) {
 		filePath = DefaultConfigFilename
 	}
 
-	configFile, err := os.Open(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open config file '%s': %w", filePath, err)
+	configFile, openError := os.Open(filePath)
+	if openError != nil {
+		return nil, fmt.Errorf("failed to open config file '%s': %w", filePath, openError)
 	}
 	defer func() {
-		if closeErr := configFile.Close(); closeErr != nil && loggerInstance != nil {
-			// Correct: Using Warnf
-			loggerInstance.Warnf("Failed to close config file: %v", closeErr)
+		if closeError := configFile.Close(); closeError != nil && loggerInstance != nil {
+			loggerInstance.Warnf("Failed to close config file: %v", closeError)
 		}
 	}()
 
 	var configuration Config
 	decoder := toml.NewDecoder(configFile)
-	if err := decoder.Decode(&configuration); err != nil {
-		return nil, fmt.Errorf("failed to decode TOML configuration: %w", err)
+	if decodeError := decoder.Decode(&configuration); decodeError != nil {
+		return nil, fmt.Errorf("failed to decode TOML configuration: %w", decodeError)
 	}
 
 	return &configuration, nil
 }
 
-func (c *Config) GetAPIKey() string {
-	return os.Getenv(c.LLM.APIKeyEnvironmentVariable)
+func (configuration *Config) GetAPIKey() string {
+	return os.Getenv(configuration.LLM.APIKeyEnvironmentVariable)
 }
 
-func (c *Config) GetLogFilePath(filename string) string {
-	return filepath.Join(c.Service.LogDir, filename)
+func (configuration *Config) GetLogFilePath(filename string) string {
+	return filepath.Join(configuration.Service.LogDir, filename)
 }
