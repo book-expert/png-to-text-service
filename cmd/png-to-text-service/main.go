@@ -196,5 +196,23 @@ func setupNATS(cfg *config.Config) (*nats.Conn, jetstream.JetStream, error) {
 		return nil, nil, err
 	}
 
+	// Ensure the Producer stream exists
+	_, err = jetStreamContext.Stream(context.Background(), cfg.NATS.Producer.Stream)
+	if err != nil {
+		_, createErr := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
+			Name:     cfg.NATS.Producer.Stream,
+			Subjects: []string{cfg.NATS.Producer.Stream + ".*"}, // Catch-all for the stream prefix
+			Storage:  jetstream.FileStorage,
+		})
+		if createErr != nil {
+			// If creation failed, try one more time to get it (in case of a race)
+			_, retryErr := jetStreamContext.Stream(context.Background(), cfg.NATS.Producer.Stream)
+			if retryErr != nil {
+				natsConnection.Close()
+				return nil, nil, fmt.Errorf("failed to ensure stream %s exists: %w", cfg.NATS.Producer.Stream, createErr)
+			}
+		}
+	}
+
 	return natsConnection, jetStreamContext, nil
 }
