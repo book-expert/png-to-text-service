@@ -93,14 +93,14 @@ func newApplication(ctx context.Context) (*Application, error) {
 	}
 
 	// 4. Stores
-	pngStore, err := jetStreamContext.ObjectStore(ctx, configuration.NATS.ObjectStore.PNGBucket)
+	pngStore, err := ensureObjectStore(ctx, jetStreamContext, configuration.NATS.ObjectStore.PNGBucket)
 	if err != nil {
 		natsConnection.Close()
 		_ = appLogger.Close()
 		return nil, err
 	}
 
-	textStore, err := jetStreamContext.ObjectStore(ctx, configuration.NATS.ObjectStore.TextBucket)
+	textStore, err := ensureObjectStore(ctx, jetStreamContext, configuration.NATS.ObjectStore.TextBucket)
 	if err != nil {
 		natsConnection.Close()
 		_ = appLogger.Close()
@@ -188,4 +188,22 @@ func setupNATS(cfg *config.Config) (*nats.Conn, jetstream.JetStream, error) {
 	}
 
 	return natsConnection, jetStreamContext, nil
+}
+
+func ensureObjectStore(ctx context.Context, js jetstream.JetStream, bucket string) (jetstream.ObjectStore, error) {
+	store, err := js.ObjectStore(ctx, bucket)
+	if err != nil {
+		store, err = js.CreateObjectStore(ctx, jetstream.ObjectStoreConfig{
+			Bucket:  bucket,
+			Storage: jetstream.FileStorage,
+		})
+		if err != nil {
+			// Try one more time to bind in case of race condition
+			store, err = js.ObjectStore(ctx, bucket)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return store, nil
 }

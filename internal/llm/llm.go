@@ -11,9 +11,10 @@ import (
 	"time"
 
 	"github.com/book-expert/logger"
-	common_events "github.com/book-expert/common-events"
+	"github.com/book-expert/common-events"
 	"google.golang.org/genai"
 )
+
 
 const (
 	MimeTypePNG = "image/png"
@@ -58,10 +59,11 @@ func NewProcessor(parentContext context.Context, configuration *Config, serviceL
 }
 
 // ProcessImage uploads, generates, and cleans up.
-func (processor *Processor) ProcessImage(parentContext context.Context, objectID string, imageData []byte, settings *common_events.JobSettings) (string, error) {
+func (processor *Processor) ProcessImage(parentContext context.Context, objectID string, imageData []byte, settings *events.JobSettings) (string, error) {
 	if len(imageData) == 0 {
 		return "", ErrFileEmpty
 	}
+
 
 	// 1. Upload
 	uploadedFile, uploadError := processor.uploadFile(parentContext, objectID, imageData)

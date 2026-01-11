@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	common_events "github.com/book-expert/common-events"
+	"github.com/book-expert/common-events"
 	"github.com/book-expert/logger"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -26,8 +26,9 @@ const (
 
 // LLMProcessor defines the contract for text extraction.
 type LLMProcessor interface {
-	ProcessImage(parentContext context.Context, objectID string, pngData []byte, settings *common_events.JobSettings) (string, error)
+	ProcessImage(parentContext context.Context, objectID string, pngData []byte, settings *events.JobSettings) (string, error)
 }
+
 
 type Worker struct {
 	jetStream       jetstream.JetStream
@@ -211,15 +212,15 @@ func (worker *Worker) keepAlive(parentContext context.Context, message jetstream
 	}
 }
 
-func (worker *Worker) parseEvent(message jetstream.Msg) (*common_events.PNGCreatedEvent, error) {
-	var event common_events.PNGCreatedEvent
+func (worker *Worker) parseEvent(message jetstream.Msg) (*events.PNGCreatedEvent, error) {
+	var event events.PNGCreatedEvent
 	if unmarshalError := json.Unmarshal(message.Data(), &event); unmarshalError != nil {
 		return nil, unmarshalError
 	}
 	return &event, nil
 }
 
-func (worker *Worker) executeWorkflow(parentContext context.Context, event *common_events.PNGCreatedEvent) error {
+func (worker *Worker) executeWorkflow(parentContext context.Context, event *events.PNGCreatedEvent) error {
 	// Step 0: Publish Extraction Started
 	if startedError := worker.publishExtractionStarted(parentContext, event); startedError != nil {
 		worker.logger.Warnf("Failed to publish extraction started event: %v", startedError)
@@ -238,7 +239,14 @@ func (worker *Worker) executeWorkflow(parentContext context.Context, event *comm
 	}
 
 	// Step 3: Store (Idempotent)
-	textKey, storeError := worker.storeText(parentContext, event, extractedText)
+	// We wrap the text in a JSON array of strings to maintain a consistent contract
+	// with the tts-service, which expects this format for segment-based processing.
+	jsonText, marshalError := json.Marshal([]string{extractedText})
+	if marshalError != nil {
+		return fmt.Errorf("marshal text: %w", marshalError)
+	}
+
+	textKey, storeError := worker.storeText(parentContext, event, string(jsonText))
 	if storeError != nil {
 		return fmt.Errorf("store: %w", storeError)
 	}
@@ -262,7 +270,7 @@ func (worker *Worker) downloadPNG(parentContext context.Context, key string) ([]
 	return io.ReadAll(object)
 }
 
-func (worker *Worker) storeText(parentContext context.Context, event *common_events.PNGCreatedEvent, content string) (string, error) {
+func (worker *Worker) storeText(parentContext context.Context, event *events.PNGCreatedEvent, content string) (string, error) {
 	// Idempotency Fix:
 	// Instead of a random UUID, we derive the text filename from the PNG filename.
 	// PNGKey is expected to be in the format "tenant/workflow/image.png"
@@ -284,12 +292,12 @@ func (worker *Worker) storeText(parentContext context.Context, event *common_eve
 	return objectKey, nil
 }
 
-func (worker *Worker) publishExtractionStarted(parentContext context.Context, source *common_events.PNGCreatedEvent) error {
+func (worker *Worker) publishExtractionStarted(parentContext context.Context, source *events.PNGCreatedEvent) error {
 	if worker.startedSubject == "" {
 		return nil
 	}
 
-	extractionStartedEvent := common_events.ExtractionStartedEvent{
+	extractionStartedEvent := events.ExtractionStartedEvent{
 		Header:     source.Header,
 		PageNumber: source.PageNumber,
 		TotalPages: source.TotalPages,
@@ -304,8 +312,8 @@ func (worker *Worker) publishExtractionStarted(parentContext context.Context, so
 	return publishError
 }
 
-func (worker *Worker) publishCompletion(parentContext context.Context, source *common_events.PNGCreatedEvent, textKey string) error {
-	textProcessedEvent := common_events.TextProcessedEvent{
+func (worker *Worker) publishCompletion(parentContext context.Context, source *events.PNGCreatedEvent, textKey string) error {
+	textProcessedEvent := events.TextProcessedEvent{
 		Header:     source.Header,
 		PNGKey:     source.PNGKey,
 		TextKey:    textKey,
@@ -313,6 +321,7 @@ func (worker *Worker) publishCompletion(parentContext context.Context, source *c
 		TotalPages: source.TotalPages,
 		Settings:   source.Settings,
 	}
+
 
 	data, marshalError := json.Marshal(textProcessedEvent)
 	if marshalError != nil {
