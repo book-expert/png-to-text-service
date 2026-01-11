@@ -16,7 +16,7 @@ Unlike traditional OCR engines that merely extract text, this service uses Googl
     - **Correction**: Joins hyphenated words split across lines and fixes OCR-induced errors.
 - **Structure Awareness**: Corrects for multi-column layouts and ignores non-text artifacts like page numbers, headers, and footers.
 - **Workflow Orchestration**: Consumes `pngs.created` events and produces `texts.processed` events once extraction is complete.
-- **Concurrent Workers**: Scalable worker pool for processing multiple document pages in parallel.
+- **Concurrent Workers**: Scalable worker pool for processing multiple document pages in parallel, powered by the `common-worker` library.
 
 ## Requirements
 
