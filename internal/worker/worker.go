@@ -13,6 +13,7 @@ import (
 	"github.com/book-expert/common-events"
 	"github.com/book-expert/common-worker"
 	"github.com/book-expert/logger"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -24,6 +25,7 @@ type LLMProcessor interface {
 // Worker coordinates the extraction of text from images using an LLM.
 type Worker struct {
 	baseWorker      *worker.Worker[*events.PNGCreatedEvent]
+	natsConn        *nats.Conn
 	jetStream       jetstream.JetStream
 	pngStore        jetstream.ObjectStore
 	textStore       jetstream.ObjectStore
@@ -35,6 +37,7 @@ type Worker struct {
 
 // New creates a strictly typed Worker using common-worker.
 func New(
+	natsConn *nats.Conn,
 	jetStream jetstream.JetStream,
 	streamName, consumerName, filterSubject string,
 	producerSubject string,
@@ -46,6 +49,7 @@ func New(
 	workerCount int,
 ) *Worker {
 	pngWorker := &Worker{
+		natsConn:        natsConn,
 		jetStream:       jetStream,
 		pngStore:        pngStore,
 		textStore:       textStore,
@@ -63,7 +67,7 @@ func New(
 		MaxDeliver:    5,
 	}
 
-	pngWorker.baseWorker = worker.New(jetStream, loggerInstance, config, pngWorker.handleMessage)
+	pngWorker.baseWorker = worker.New(natsConn, jetStream, loggerInstance, config, pngWorker.handleMessage)
 	return pngWorker
 }
 

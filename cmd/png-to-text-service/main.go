@@ -6,7 +6,6 @@ import (
 	"context"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/book-expert/logger"
@@ -94,14 +93,14 @@ func newApplication(parentContext context.Context) (*Application, error) {
 	}
 
 	// 4. Stores
-	pngStore, pngStoreError := ensureObjectStore(parentContext, jetStreamContext, configuration.NATS.ObjectStore.PNGBucket)
+	pngStore, pngStoreError := getObjectStore(parentContext, jetStreamContext, configuration.NATS.ObjectStore.PNGBucket)
 	if pngStoreError != nil {
 		natsConnection.Close()
 		_ = appLogger.Close()
 		return nil, pngStoreError
 	}
 
-	textStore, textStoreError := ensureObjectStore(parentContext, jetStreamContext, configuration.NATS.ObjectStore.TextBucket)
+	textStore, textStoreError := getObjectStore(parentContext, jetStreamContext, configuration.NATS.ObjectStore.TextBucket)
 	if textStoreError != nil {
 		natsConnection.Close()
 		_ = appLogger.Close()
@@ -127,6 +126,7 @@ func newApplication(parentContext context.Context) (*Application, error) {
 
 	// 6. Worker
 	workerInstance := worker.New(
+		natsConnection,
 		jetStreamContext,
 		configuration.NATS.Consumer.Stream,
 		configuration.NATS.Consumer.Durable,
@@ -170,43 +170,9 @@ func setupNATS(configuration *config.Config) (*nats.Conn, jetstream.JetStream, e
 		return nil, nil, jetStreamError
 	}
 
-	// Ensure the Producer stream exists
-	_, lookupError := jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.Stream)
-	if lookupError != nil {
-		_, createError := jetStreamContext.CreateStream(context.Background(), jetstream.StreamConfig{
-			Name:     configuration.NATS.Producer.Stream,
-			Subjects: []string{strings.ToLower(configuration.NATS.Producer.Stream) + ".*"}, // Catch-all for the stream prefix
-			Storage:  jetstream.FileStorage,
-		})
-		if createError != nil {
-			// If creation failed, try one more time to get it (in case of a race)
-			_, retryError := jetStreamContext.Stream(context.Background(), configuration.NATS.Producer.Stream)
-			if retryError != nil {
-				natsConnection.Close()
-				return nil, nil, createError
-			}
-		}
-	}
-
 	return natsConnection, jetStreamContext, nil
 }
 
-func ensureObjectStore(parentContext context.Context, jetStream jetstream.JetStream, bucket string) (jetstream.ObjectStore, error) {
-	store, lookupError := jetStream.ObjectStore(parentContext, bucket)
-	if lookupError != nil {
-		var createError error
-		store, createError = jetStream.CreateObjectStore(parentContext, jetstream.ObjectStoreConfig{
-			Bucket:  bucket,
-			Storage: jetstream.FileStorage,
-		})
-		if createError != nil {
-			// Try one more time to bind in case of race condition
-			var retryError error
-			store, retryError = jetStream.ObjectStore(parentContext, bucket)
-			if retryError != nil {
-				return nil, createError
-			}
-		}
-	}
-	return store, nil
+func getObjectStore(parentContext context.Context, jetStream jetstream.JetStream, bucket string) (jetstream.ObjectStore, error) {
+	return jetStream.ObjectStore(parentContext, bucket)
 }
