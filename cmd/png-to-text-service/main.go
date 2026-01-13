@@ -125,20 +125,25 @@ func newApplication(parentContext context.Context) (*Application, error) {
 	}
 
 	// 6. Worker
-	workerInstance := worker.New(
+	workerInstance, workerInitError := worker.New(
 		natsConnection,
 		jetStreamContext,
+		jetStreamContext,
 		configuration.NATS.Consumer.Stream,
-		configuration.NATS.Consumer.Durable,
 		configuration.NATS.Consumer.Subject,
+		configuration.NATS.Consumer.Durable,
 		configuration.NATS.Producer.Subject,
-		configuration.NATS.Producer.StartedSubject,
 		llmClient,
 		appLogger,
 		pngStore,
 		textStore,
 		configuration.Service.Workers,
 	)
+	if workerInitError != nil {
+		natsConnection.Close()
+		_ = appLogger.Close()
+		return nil, workerInitError
+	}
 
 	return &Application{
 		configuration:    configuration,

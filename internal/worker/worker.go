@@ -1,5 +1,3 @@
-// DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS
-
 /* DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS */
 
 package worker
@@ -15,7 +13,7 @@ import (
 	"github.com/book-expert/common-events"
 	"github.com/book-expert/common-worker"
 	"github.com/book-expert/logger"
-	"github.com/book-expert/png-to-text-service/internal/core"
+	"github.com/book-expert/png-to-text-service/internal/llm"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -38,7 +36,7 @@ type Worker struct {
 	producerSubject    string
 	pngStore           jetstream.ObjectStore
 	textStore          jetstream.ObjectStore
-	llm                core.LLMProcessor
+	llm                *llm.Processor
 	logger             *logger.Logger
 }
 
@@ -51,10 +49,10 @@ func New(
 	subscriptionSubject string,
 	consumerDurableName string,
 	producerSubject string,
+	llm *llm.Processor,
+	serviceLogger *logger.Logger,
 	pngStore jetstream.ObjectStore,
 	textStore jetstream.ObjectStore,
-	llm core.LLMProcessor,
-	serviceLogger *logger.Logger,
 	workerCount int,
 ) (*Worker, error) {
 	pngWorker := &Worker{
@@ -78,8 +76,8 @@ func New(
 	return pngWorker, nil
 }
 
-// Run executes the main worker loop.
-func (pngWorker *Worker) Run(systemContext context.Context) error {
+// Start executes the main worker loop.
+func (pngWorker *Worker) Start(systemContext context.Context) error {
 	return pngWorker.baseWorker.Start(systemContext)
 }
 
@@ -137,10 +135,11 @@ func (pngWorker *Worker) downloadPNG(parentContext context.Context, key string) 
 		return nil, getError
 	}
 	defer func() {
-		_ = object.Error()
+		_ = object.Close()
 	}()
 
-	data := make([]byte, object.Info().Size)
+	info, _ := object.Info()
+	data := make([]byte, info.Size)
 	_, readError := object.Read(data)
 	return data, readError
 }
