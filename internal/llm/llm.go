@@ -10,11 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/book-expert/logger"
 	"github.com/book-expert/common-events"
+	"github.com/book-expert/logger"
 	"google.golang.org/genai"
 )
-
 
 const (
 	MimeTypePNG = "image/png"
@@ -42,7 +41,6 @@ type Processor struct {
 	config Config
 }
 
-// NewProcessor initializes the client.
 func NewProcessor(parentContext context.Context, configuration *Config, serviceLogger *logger.Logger) (*Processor, error) {
 	client, clientError := genai.NewClient(parentContext, &genai.ClientConfig{
 		APIKey: configuration.APIKey,
@@ -58,28 +56,17 @@ func NewProcessor(parentContext context.Context, configuration *Config, serviceL
 	}, nil
 }
 
-// ProcessImage uploads, generates, and cleans up.
 func (processor *Processor) ProcessImage(parentContext context.Context, objectID string, imageData []byte, settings *events.JobSettings) (string, error) {
 	if len(imageData) == 0 {
 		return "", ErrFileEmpty
 	}
 
-
-	// 1. Upload
 	uploadedFile, uploadError := processor.uploadFile(parentContext, objectID, imageData)
 	if uploadError != nil {
 		return "", uploadError
 	}
-
-	// 2. Cleanup Deferral
 	defer processor.cleanupFile(uploadedFile.Name)
 
-	// 3. Build Vision Prompt (System Instruction)
-	// We combine:
-	// - Base instruction from config (TOML)
-	// - User-defined exclusions (Settings.Exclusions)
-	// - User-defined augmentation (Settings.AugmentationPrompt)
-	// - AI-generated Text Directives (Settings.AudioSessionConfig.TextDirective)
 	var exclusions, augmentation string
 	if settings != nil {
 		exclusions = settings.Exclusions
@@ -93,51 +80,36 @@ func (processor *Processor) ProcessImage(parentContext context.Context, objectID
 
 	systemInstruction := processor.buildVisionSystemInstruction(exclusions, augmentation, textDirective)
 
-	// User prompt: Simple directive to execute the system instruction.
-	// We can use the ExtractionPrompt from TOML if available.
 	userPrompt := processor.config.ExtractionPrompt
 	if userPrompt == "" {
 		userPrompt = "Extract the text from this image."
 	}
 
-	// 4. Generate with Retries (Extract Text)
 	extractedText, generationError := processor.generateWithRetries(parentContext, uploadedFile, systemInstruction, userPrompt)
 	if generationError != nil {
 		return "", generationError
 	}
 
-	// 5. Return Clean Text (No Headers)
 	return extractedText, nil
 }
 
 func (processor *Processor) buildVisionSystemInstruction(exclusions string, augmentation string, textDirective string) string {
-	// Start with the base instruction from TOML
 	instruction := processor.config.SystemInstruction
-
-	// If TOML was empty, fall back to a reasonable default (though TOML should be source of truth)
 	if instruction == "" {
-		instruction = `You are an expert narrator. Extract text cleanly.`
+		instruction = "You are an expert narrator. Extract text cleanly."
 	}
 
-	// Append dynamic exclusions
 	if exclusions != "" {
-		instruction += "\n\nCRITICAL EXCLUSIONS (Do NOT Read):\n"
-		instruction += exclusions
+		instruction += "\n\nCRITICAL EXCLUSIONS (Do NOT Read):\n" + exclusions
 	}
 
-	// Append AI-generated structural directives
 	if textDirective != "" {
-		instruction += "\n\nSTRUCTURAL CLEANUP RULES:\n"
-		instruction += textDirective
+		instruction += "\n\nSTRUCTURAL CLEANUP RULES:\n" + textDirective
 	}
 
-	// Append User Augmentation (Descriptive capabilities)
 	if augmentation != "" {
-		instruction += "\n\nNARRATIVE AUGMENTATION REQUEST:\n"
-		instruction += augmentation
-		instruction += "\n\n(Note: You are permitted to insert descriptive text for visuals or explanations IF requested above. Integrate these naturally into the narrative flow, without using brackets, labels, or special tags like [DESCRIPTION]. The goal is a seamless audio book experience.)"
+		instruction += "\n\nNARRATIVE AUGMENTATION REQUEST:\n" + augmentation + "\n\n(Note: You are permitted to insert descriptive text for visuals or explanations IF requested above. Integrate these naturally into the narrative flow, without using brackets, labels, or special tags like [DESCRIPTION]. The goal is a seamless audio book experience.)"
 	} else {
-		// Strict pure transcript mode if no augmentation requested
 		instruction += "\n\nCRITICAL: Output ONLY the spoken text. Do NOT output metadata, headers, scene descriptions, or music cues. The output must be pure transcript."
 	}
 
@@ -173,7 +145,6 @@ func (processor *Processor) generateWithRetries(parentContext context.Context, f
 
 	for attempt := 1; attempt <= processor.config.MaxRetries; attempt++ {
 		result, callError := processor.callGenAIModel(parentContext, file, systemInstruction, userPrompt)
-
 		if callError == nil {
 			return result, nil
 		}
@@ -200,7 +171,6 @@ func (processor *Processor) callGenAIModel(parentContext context.Context, file *
 
 	temperature := float32(processor.config.Temperature)
 
-	// We rely on the System Instruction to enforce the format.
 	response, generationError := processor.client.Models.GenerateContent(
 		generationContext,
 		processor.config.Model,
