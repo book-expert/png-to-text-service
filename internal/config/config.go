@@ -19,8 +19,8 @@ type Config struct {
 
 // ServiceSettings contains general service parameters.
 type ServiceSettings struct {
-	LogDir  string
-	Workers int
+	LogDirectory string
+	Workers      int
 }
 
 // LLMSettings captures parameters for the Large Language Model provider.
@@ -44,7 +44,7 @@ type NATSSettings struct {
 
 // ConsumerSettings defines the JetStream consumer parameters.
 type ConsumerSettings struct {
-	Durable string
+	DurableName string
 }
 
 // Load retrieves the configuration from environment variables.
@@ -52,53 +52,53 @@ func Load(_ string, _ *logger.Logger) (*Config, error) {
 	var configuration Config
 
 	// Service Settings
-	configuration.Service.LogDir = getEnv("PNG_TO_TEXT_LOG_DIR", "/home/niko/development/logs/tts-logs")
-	configuration.Service.Workers = getEnvInt("PNG_TO_TEXT_WORKERS", 5)
+	configuration.Service.LogDirectory = getEnvironmentVariable("PNG_TO_TEXT_LOG_DIR", "/home/niko/development/logs/tts-logs")
+	configuration.Service.Workers = getEnvironmentVariableAsInteger("PNG_TO_TEXT_WORKERS", 5)
 
 	// LLM Settings
 	configuration.LLM.APIKeyEnvironmentVariable = "GEMINI_API_KEY"
-	configuration.LLM.BaseURL = getEnv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
-	configuration.LLM.Model = getEnv("PNG_TO_TEXT_LLM_MODEL", "gemini-2.5-flash")
-	configuration.LLM.MaxRetries = getEnvInt("PNG_TO_TEXT_MAX_RETRIES", 3)
-	configuration.LLM.TimeoutSeconds = getEnvInt("PNG_TO_TEXT_TIMEOUT_SECONDS", 90)
-	configuration.LLM.Temperature = getEnvFloat("PNG_TO_TEXT_TEMPERATURE", 0.0)
+	configuration.LLM.BaseURL = getEnvironmentVariable("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
+	configuration.LLM.Model = getEnvironmentVariable("PNG_TO_TEXT_LLM_MODEL", "gemini-2.5-flash")
+	configuration.LLM.MaxRetries = getEnvironmentVariableAsInteger("PNG_TO_TEXT_MAX_RETRIES", 3)
+	configuration.LLM.TimeoutSeconds = getEnvironmentVariableAsInteger("PNG_TO_TEXT_TIMEOUT_SECONDS", 90)
+	configuration.LLM.Temperature = getEnvironmentVariableAsFloat("PNG_TO_TEXT_TEMPERATURE", 0.0)
 	configuration.LLM.ExtractionPrompt = os.Getenv("PNG_TO_TEXT_EXTRACTION_PROMPT")
 	configuration.LLM.SystemInstruction = os.Getenv("PNG_TO_TEXT_SYSTEM_INSTRUCTION")
 
 	// NATS Settings
-	configuration.NATS.URL = getEnv("NATS_ADDRESS", "nats://localhost:4222")
-	configuration.NATS.DLQSubject = getEnv("PNG_TO_TEXT_DLQ_SUBJECT", "png.to.text.dlq")
-	configuration.NATS.Consumer.Durable = getEnv("PNG_TO_TEXT_DURABLE_NAME", "png-to-text-consumer")
+	configuration.NATS.URL = getEnvironmentVariable("NATS_ADDRESS", "nats://localhost:4222")
+	configuration.NATS.DLQSubject = getEnvironmentVariable("PNG_TO_TEXT_DLQ_SUBJECT", "png.to.text.dlq")
+	configuration.NATS.Consumer.DurableName = getEnvironmentVariable("PNG_TO_TEXT_DURABLE_NAME", "png-to-text-consumer")
 
 	return &configuration, nil
 }
 
-func getEnv(key, fallback string) string {
+func getEnvironmentVariable(key, fallback string) string {
 	if value, exists := os.LookupEnv(key); exists {
 		return value
 	}
 	return fallback
 }
 
-func getEnvInt(key string, fallback int) int {
-	valueStr := getEnv(key, "")
-	if valueStr == "" {
+func getEnvironmentVariableAsInteger(key string, fallback int) int {
+	valueString := getEnvironmentVariable(key, "")
+	if valueString == "" {
 		return fallback
 	}
-	value, err := strconv.Atoi(valueStr)
-	if err != nil {
+	value, error := strconv.Atoi(valueString)
+	if error != nil {
 		return fallback
 	}
 	return value
 }
 
-func getEnvFloat(key string, fallback float64) float64 {
-	valueStr := getEnv(key, "")
-	if valueStr == "" {
+func getEnvironmentVariableAsFloat(key string, fallback float64) float64 {
+	valueString := getEnvironmentVariable(key, "")
+	if valueString == "" {
 		return fallback
 	}
-	value, err := strconv.ParseFloat(valueStr, 64)
-	if err != nil {
+	value, error := strconv.ParseFloat(valueString, 64)
+	if error != nil {
 		return fallback
 	}
 	return value
@@ -111,5 +111,5 @@ func (configuration *Config) GetAPIKey() string {
 
 // GetLogFilePath constructs an absolute path for a log file.
 func (configuration *Config) GetLogFilePath(filename string) string {
-	return filepath.Join(configuration.Service.LogDir, filename)
+	return filepath.Join(configuration.Service.LogDirectory, filename)
 }

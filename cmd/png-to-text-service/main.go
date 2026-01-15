@@ -24,27 +24,27 @@ const (
 // Application encapsulates the service dependencies.
 type Application struct {
 	configuration    *config.Config
-	logger           *logger.Logger
+	serviceLogger    *logger.Logger
 	natsConnection   *nats.Conn
 	jetStreamContext jetstream.JetStream
-	workerInstance   *worker.Worker
+	processor        *worker.Processor
 }
 
 func main() {
-	rootContext, cancel := signal.NotifyContext(
+	rootContext, cancelStopSignal := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
 		syscall.SIGTERM,
 	)
-	defer cancel()
+	defer cancelStopSignal()
 
 	if executionError := run(rootContext); executionError != nil {
 		logDirectory := os.Getenv("LOG_DIR")
 		if logDirectory == "" {
 			logDirectory = os.TempDir()
 		}
-		exitLogger, loggerError := logger.New(logDirectory, LogFileName)
-		if loggerError == nil {
+		exitLogger, loggerInitializationError := logger.New(logDirectory, LogFileName)
+		if loggerInitializationError == nil {
 			exitLogger.Errorf("Fatal application error: %v", executionError)
 			_ = exitLogger.Close()
 		}
@@ -53,14 +53,14 @@ func main() {
 }
 
 func run(parentContext context.Context) error {
-	application, applicationError := newApplication(parentContext)
-	if applicationError != nil {
-		return applicationError
+	application, applicationInitializationError := newApplication(parentContext)
+	if applicationInitializationError != nil {
+		return applicationInitializationError
 	}
 	defer application.cleanup()
 
-	application.logger.Infof("Starting PNG-to-Text Service...")
-	return application.workerInstance.Start(parentContext)
+	application.serviceLogger.Infof("Starting PNG-to-Text Service...")
+	return application.processor.Start(parentContext)
 }
 
 func newApplication(parentContext context.Context) (*Application, error) {
@@ -70,45 +70,45 @@ func newApplication(parentContext context.Context) (*Application, error) {
 	}
 
 	// 1. Initial Logger for Config Loading
-	initLogger, _ := logger.New(logDirectory, LogFileName)
-	configuration, configLoadError := config.Load("", initLogger)
-	if configLoadError != nil {
-		_ = initLogger.Close()
-		return nil, configLoadError
+	initialLogger, _ := logger.New(logDirectory, LogFileName)
+	configuration, configurationLoadError := config.Load("", initialLogger)
+	if configurationLoadError != nil {
+		_ = initialLogger.Close()
+		return nil, configurationLoadError
 	}
 
-	// 2. Final Logger
-	appLogger, loggerInitError := logger.New(logDirectory, LogFileName)
-	if loggerInitError != nil {
-		_ = initLogger.Close()
-		return nil, loggerInitError
+	// 2. Final Service Logger
+	serviceLogger, loggerInitializationError := logger.New(logDirectory, LogFileName)
+	if loggerInitializationError != nil {
+		_ = initialLogger.Close()
+		return nil, loggerInitializationError
 	}
-	_ = initLogger.Close()
+	_ = initialLogger.Close()
 
 	// 3. NATS setup
 	natsConnection, jetStreamContext, natsSetupError := setupNATS(configuration)
 	if natsSetupError != nil {
-		_ = appLogger.Close()
+		_ = serviceLogger.Close()
 		return nil, natsSetupError
 	}
 
-	// 4. Stores
-	pngStore, pngStoreError := getObjectStore(parentContext, jetStreamContext, events.BucketPngFiles)
+	// 4. Object Stores
+	pngObjectStore, pngStoreError := getObjectStore(parentContext, jetStreamContext, events.BucketPngFiles)
 	if pngStoreError != nil {
 		natsConnection.Close()
-		_ = appLogger.Close()
+		_ = serviceLogger.Close()
 		return nil, pngStoreError
 	}
 
-	textStore, textStoreError := getObjectStore(parentContext, jetStreamContext, events.BucketTextFiles)
+	textObjectStore, textStoreError := getObjectStore(parentContext, jetStreamContext, events.BucketTextFiles)
 	if textStoreError != nil {
 		natsConnection.Close()
-		_ = appLogger.Close()
+		_ = serviceLogger.Close()
 		return nil, textStoreError
 	}
 
-	// 5. LLM client
-	llmConfig := llm.Config{
+	// 5. LLM processor
+	llmConfiguration := llm.Config{
 		APIKey:            configuration.GetAPIKey(),
 		Model:             configuration.LLM.Model,
 		Temperature:       configuration.LLM.Temperature,
@@ -117,40 +117,40 @@ func newApplication(parentContext context.Context) (*Application, error) {
 		SystemInstruction: configuration.LLM.SystemInstruction,
 		ExtractionPrompt:  configuration.LLM.ExtractionPrompt,
 	}
-	llmClient, llmInitError := llm.NewProcessor(parentContext, &llmConfig, appLogger)
-	if llmInitError != nil {
+	llmProcessor, llmInitializationError := llm.NewProcessor(parentContext, &llmConfiguration, serviceLogger)
+	if llmInitializationError != nil {
 		natsConnection.Close()
-		_ = appLogger.Close()
-		return nil, llmInitError
+		_ = serviceLogger.Close()
+		return nil, llmInitializationError
 	}
 
-	// 6. Worker
-	workerInstance, workerInitError := worker.New(
+	// 6. Processor
+	processorInstance, processorInitializationError := worker.NewProcessor(
 		natsConnection,
 		jetStreamContext,
 		jetStreamContext,
 		events.StreamPngFiles,
 		events.SubjectPngCreated,
-		configuration.NATS.Consumer.Durable,
+		configuration.NATS.Consumer.DurableName,
 		events.SubjectExtractionCompleted,
-		llmClient,
-		appLogger,
-		pngStore,
-		textStore,
+		llmProcessor,
+		serviceLogger,
+		pngObjectStore,
+		textObjectStore,
 		configuration.Service.Workers,
 	)
-	if workerInitError != nil {
+	if processorInitializationError != nil {
 		natsConnection.Close()
-		_ = appLogger.Close()
-		return nil, workerInitError
+		_ = serviceLogger.Close()
+		return nil, processorInitializationError
 	}
 
 	return &Application{
 		configuration:    configuration,
-		logger:           appLogger,
+		serviceLogger:    serviceLogger,
 		natsConnection:   natsConnection,
 		jetStreamContext: jetStreamContext,
-		workerInstance:   workerInstance,
+		processor:        processorInstance,
 	}, nil
 }
 
@@ -158,8 +158,8 @@ func (application *Application) cleanup() {
 	if application.natsConnection != nil {
 		application.natsConnection.Close()
 	}
-	if application.logger != nil {
-		_ = application.logger.Close()
+	if application.serviceLogger != nil {
+		_ = application.serviceLogger.Close()
 	}
 }
 

@@ -29,19 +29,19 @@ type JetStreamPublisher interface {
 	Publish(requestContext context.Context, subject string, data []byte, options ...jetstream.PublishOpt) (*jetstream.PubAck, error)
 }
 
-// Worker manages the lifecycle of processing image-to-text conversion requests from NATS.
-type Worker struct {
-	baseWorker         *worker.Worker[*events.PngCreatedEvent]
+// Processor coordinates the extraction of text from PNG images using Large Language Models.
+type Processor struct {
+	engine             *worker.Worker[*events.PngCreatedEvent]
 	jetStreamPublisher JetStreamPublisher
 	producerSubject    string
-	pngStore           jetstream.ObjectStore
-	textStore          jetstream.ObjectStore
-	llm                *llm.Processor
-	logger             *logger.Logger
+	pngObjectStore     jetstream.ObjectStore
+	textObjectStore    jetstream.ObjectStore
+	llmProcessor       *llm.Processor
+	serviceLogger      *logger.Logger
 }
 
-// New initializes a new Worker with all necessary dependencies.
-func New(
+// NewProcessor initializes a new Processor with all necessary dependencies.
+func NewProcessor(
 	natsConnection *nats.Conn,
 	jetStreamContext jetstream.JetStream,
 	jetStreamPublisher JetStreamPublisher,
@@ -49,19 +49,19 @@ func New(
 	subscriptionSubject string,
 	consumerDurableName string,
 	producerSubject string,
-	llm *llm.Processor,
+	llmProcessor *llm.Processor,
 	serviceLogger *logger.Logger,
-	pngStore jetstream.ObjectStore,
-	textStore jetstream.ObjectStore,
+	pngObjectStore jetstream.ObjectStore,
+	textObjectStore jetstream.ObjectStore,
 	workerCount int,
-) (*Worker, error) {
-	pngWorker := &Worker{
+) (*Processor, error) {
+	pngProcessor := &Processor{
 		jetStreamPublisher: jetStreamPublisher,
 		producerSubject:    producerSubject,
-		pngStore:           pngStore,
-		textStore:          textStore,
-		llm:                llm,
-		logger:             serviceLogger,
+		pngObjectStore:     pngObjectStore,
+		textObjectStore:    textObjectStore,
+		llmProcessor:       llmProcessor,
+		serviceLogger:      serviceLogger,
 	}
 
 	workerConfiguration := worker.Config{
@@ -72,65 +72,64 @@ func New(
 		MaxDeliver:    5,
 	}
 
-	pngWorker.baseWorker = worker.New(natsConnection, jetStreamContext, serviceLogger, workerConfiguration, pngWorker.handleMessage)
-	return pngWorker, nil
+	pngProcessor.engine = worker.New(natsConnection, jetStreamContext, serviceLogger, workerConfiguration, pngProcessor.handleMessage)
+	return pngProcessor, nil
 }
 
-// Start executes the main worker loop.
-func (pngWorker *Worker) Start(systemContext context.Context) error {
-	return pngWorker.baseWorker.Start(systemContext)
+// Start executes the underlying worker engine.
+func (processor *Processor) Start(systemContext context.Context) error {
+	return processor.engine.Start(systemContext)
 }
 
-func (pngWorker *Worker) handleMessage(requestContext context.Context, event *events.PngCreatedEvent, message jetstream.Msg) error {
+func (processor *Processor) handleMessage(requestContext context.Context, event *events.PngCreatedEvent, message jetstream.Msg) error {
 	parentContext, cancelProcessing := context.WithTimeout(requestContext, MessageProcessingTimeout)
 	defer cancelProcessing()
 
-	pngWorker.logger.Infof("Processing: %s (Page %d)", event.PngKey, event.PageNumber)
+	processor.serviceLogger.Infof("Processing: %s (Page %d)", event.PngKey, event.PageNumber)
 
-	if workflowError := pngWorker.executeWorkflow(parentContext, event); workflowError != nil {
-		pngWorker.logger.Errorf("Workflow failed [%s]: %v", event.PngKey, workflowError)
+	if workflowError := processor.executeWorkflow(parentContext, event); workflowError != nil {
+		processor.serviceLogger.Errorf("Workflow failed [%s]: %v", event.PngKey, workflowError)
 		// Nak with delay to allow retry
 		_ = message.NakWithDelay(10 * time.Second)
 		return workflowError
 	}
 
-	pngWorker.logger.Successf("Completed: %s", event.PngKey)
+	processor.serviceLogger.Successf("Completed: %s", event.PngKey)
 	return nil
 }
 
-func (pngWorker *Worker) executeWorkflow(parentContext context.Context, event *events.PngCreatedEvent) error {
+func (processor *Processor) executeWorkflow(parentContext context.Context, event *events.PngCreatedEvent) error {
 	// Step 1: Download image
-	pngData, downloadError := pngWorker.downloadPNG(parentContext, event.PngKey)
+	pngData, downloadError := processor.downloadPNG(parentContext, event.PngKey)
 	if downloadError != nil {
 		return fmt.Errorf("download: %w", downloadError)
 	}
 
 	// Step 2: Extract text via LLM
-	extractedText, llmError := pngWorker.llm.ProcessImage(parentContext, event.PngKey, pngData, event.Settings)
+	extractedText, llmError := processor.llmProcessor.ProcessImage(parentContext, event.PngKey, pngData, event.Settings)
 	if llmError != nil {
 		return fmt.Errorf("llm: %w", llmError)
 	}
 
 	// JSON format the extracted text segments for the tts-service contract
-	// tts-service expects a JSON array of strings: []string
 	jsonText, _ := json.Marshal([]string{extractedText})
 
 	// Step 3: Store (Idempotent)
-	textKey, storeError := pngWorker.storeText(parentContext, event, string(jsonText))
+	textKey, storeError := processor.storeText(parentContext, event, string(jsonText))
 	if storeError != nil {
 		return fmt.Errorf("store: %w", storeError)
 	}
 
 	// Step 4: Publish
-	if completionError := pngWorker.publishCompletion(parentContext, event, textKey); completionError != nil {
+	if completionError := processor.publishCompletion(parentContext, event, textKey); completionError != nil {
 		return fmt.Errorf("publish: %w", completionError)
 	}
 
 	return nil
 }
 
-func (pngWorker *Worker) downloadPNG(parentContext context.Context, key string) ([]byte, error) {
-	object, getError := pngWorker.pngStore.Get(parentContext, key)
+func (processor *Processor) downloadPNG(parentContext context.Context, key string) ([]byte, error) {
+	object, getError := processor.pngObjectStore.Get(parentContext, key)
 	if getError != nil {
 		return nil, getError
 	}
@@ -144,7 +143,7 @@ func (pngWorker *Worker) downloadPNG(parentContext context.Context, key string) 
 	return data, readError
 }
 
-func (pngWorker *Worker) storeText(parentContext context.Context, event *events.PngCreatedEvent, content string) (string, error) {
+func (processor *Processor) storeText(parentContext context.Context, event *events.PngCreatedEvent, content string) (string, error) {
 	baseName := strings.TrimSuffix(event.PngKey, ".png")
 	textKey := baseName + ".json"
 
@@ -153,11 +152,11 @@ func (pngWorker *Worker) storeText(parentContext context.Context, event *events.
 		Description: fmt.Sprintf("Text extraction for %s", event.PngKey),
 	}
 
-	_, putError := pngWorker.textStore.Put(parentContext, metadata, bytes.NewReader([]byte(content)))
+	_, putError := processor.textObjectStore.Put(parentContext, metadata, bytes.NewReader([]byte(content)))
 	return textKey, putError
 }
 
-func (pngWorker *Worker) publishCompletion(parentContext context.Context, source *events.PngCreatedEvent, textKey string) error {
+func (processor *Processor) publishCompletion(parentContext context.Context, source *events.PngCreatedEvent, textKey string) error {
 	event := events.TextProcessedEvent{
 		Header: events.EventHeader{
 			WorkflowIdentifier: source.Header.WorkflowIdentifier,
@@ -174,6 +173,6 @@ func (pngWorker *Worker) publishCompletion(parentContext context.Context, source
 	}
 
 	data, _ := json.Marshal(event)
-	_, publishError := pngWorker.jetStreamPublisher.Publish(parentContext, pngWorker.producerSubject, data)
+	_, publishError := processor.jetStreamPublisher.Publish(parentContext, processor.producerSubject, data)
 	return publishError
 }
