@@ -3,91 +3,113 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/book-expert/logger"
-	"github.com/pelletier/go-toml/v2"
 )
 
-const DefaultConfigFilename = "project.toml"
-
+// Config represents the full configuration structure for the service.
 type Config struct {
-	Service ServiceSettings `toml:"service"`
-	LLM     LLMSettings     `toml:"llm"`
-	NATS    NATSSettings    `toml:"nats"`
+	Service ServiceSettings
+	LLM     LLMSettings
+	NATS    NATSSettings
 }
 
+// ServiceSettings contains general service parameters.
 type ServiceSettings struct {
-	LogDir  string `toml:"log_dir"`
-	Workers int    `toml:"workers"`
+	LogDir  string
+	Workers int
 }
 
+// LLMSettings captures parameters for the Large Language Model provider.
 type LLMSettings struct {
-	APIKeyEnvironmentVariable string  `toml:"api_key_variable"`
-	BaseURL                   string  `toml:"base_url"`
-	Model                     string  `toml:"model"`
-	MaxRetries                int     `toml:"max_retries"`
-	TimeoutSeconds            int     `toml:"timeout_seconds"`
-	Temperature               float64 `toml:"temperature"`
-	SystemInstruction         string  `toml:"system_instruction"`
-	ExtractionPrompt          string  `toml:"extraction_prompt"`
+	APIKeyEnvironmentVariable string
+	BaseURL                   string
+	Model                     string
+	MaxRetries                int
+	TimeoutSeconds            int
+	Temperature               float64
+	SystemInstruction         string
+	ExtractionPrompt          string
 }
 
+// NATSSettings defines connection and consumer settings for NATS.
 type NATSSettings struct {
-	URL         string              `toml:"url"`
-	DLQSubject  string              `toml:"dlq_subject"`
-	Consumer    ConsumerSettings    `toml:"consumer"`
-	Producer    ProducerSettings    `toml:"producer"`
-	ObjectStore ObjectStoreSettings `toml:"object_store"`
+	URL        string
+	DLQSubject string
+	Consumer   ConsumerSettings
 }
 
+// ConsumerSettings defines the JetStream consumer parameters.
 type ConsumerSettings struct {
-	Stream  string `toml:"stream"`
-	Subject string `toml:"subject"`
-	Durable string `toml:"durable"`
+	Durable string
 }
 
-type ProducerSettings struct {
-	Stream         string `toml:"stream"`
-	Subject        string `toml:"subject"`
-	StartedSubject string `toml:"started_subject"`
-}
-
-type ObjectStoreSettings struct {
-	PNGBucket  string `toml:"png_bucket"`
-	TextBucket string `toml:"text_bucket"`
-}
-
-func Load(filePath string, loggerInstance *logger.Logger) (*Config, error) {
-	if filePath == "" {
-		filePath = DefaultConfigFilename
-	}
-
-	configFile, openError := os.Open(filePath)
-	if openError != nil {
-		return nil, fmt.Errorf("failed to open config file '%s': %w", filePath, openError)
-	}
-	defer func() {
-		if closeError := configFile.Close(); closeError != nil && loggerInstance != nil {
-			loggerInstance.Warnf("Failed to close config file: %v", closeError)
-		}
-	}()
-
+// Load retrieves the configuration from environment variables.
+func Load(_ string, _ *logger.Logger) (*Config, error) {
 	var configuration Config
-	decoder := toml.NewDecoder(configFile)
-	if decodeError := decoder.Decode(&configuration); decodeError != nil {
-		return nil, fmt.Errorf("failed to decode TOML configuration: %w", decodeError)
-	}
+
+	// Service Settings
+	configuration.Service.LogDir = getEnv("PNG_TO_TEXT_LOG_DIR", "/home/niko/development/logs/tts-logs")
+	configuration.Service.Workers = getEnvInt("PNG_TO_TEXT_WORKERS", 5)
+
+	// LLM Settings
+	configuration.LLM.APIKeyEnvironmentVariable = "GEMINI_API_KEY"
+	configuration.LLM.BaseURL = getEnv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
+	configuration.LLM.Model = getEnv("PNG_TO_TEXT_LLM_MODEL", "gemini-2.5-flash")
+	configuration.LLM.MaxRetries = getEnvInt("PNG_TO_TEXT_MAX_RETRIES", 3)
+	configuration.LLM.TimeoutSeconds = getEnvInt("PNG_TO_TEXT_TIMEOUT_SECONDS", 90)
+	configuration.LLM.Temperature = getEnvFloat("PNG_TO_TEXT_TEMPERATURE", 0.0)
+	configuration.LLM.ExtractionPrompt = os.Getenv("PNG_TO_TEXT_EXTRACTION_PROMPT")
+	configuration.LLM.SystemInstruction = os.Getenv("PNG_TO_TEXT_SYSTEM_INSTRUCTION")
+
+	// NATS Settings
+	configuration.NATS.URL = getEnv("NATS_ADDRESS", "nats://localhost:4222")
+	configuration.NATS.DLQSubject = getEnv("PNG_TO_TEXT_DLQ_SUBJECT", "png.to.text.dlq")
+	configuration.NATS.Consumer.Durable = getEnv("PNG_TO_TEXT_DURABLE_NAME", "png-to-text-consumer")
 
 	return &configuration, nil
 }
 
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	valueStr := getEnv(key, "")
+	if valueStr == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(valueStr)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func getEnvFloat(key string, fallback float64) float64 {
+	valueStr := getEnv(key, "")
+	if valueStr == "" {
+		return fallback
+	}
+	value, err := strconv.ParseFloat(valueStr, 64)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+// GetAPIKey resolves the actual API key value from the configured environment variable.
 func (configuration *Config) GetAPIKey() string {
 	return os.Getenv(configuration.LLM.APIKeyEnvironmentVariable)
 }
 
+// GetLogFilePath constructs an absolute path for a log file.
 func (configuration *Config) GetLogFilePath(filename string) string {
 	return filepath.Join(configuration.Service.LogDir, filename)
 }

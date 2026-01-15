@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/book-expert/common-events"
 	"github.com/book-expert/logger"
 	"github.com/book-expert/png-to-text-service/internal/config"
 	"github.com/book-expert/png-to-text-service/internal/llm"
@@ -17,8 +18,7 @@ import (
 )
 
 const (
-	ConfigFileName = "project.toml"
-	LogFileName    = "png-to-text-service.log"
+	LogFileName = "png-to-text-service.log"
 )
 
 // Application encapsulates the service dependencies.
@@ -71,7 +71,7 @@ func newApplication(parentContext context.Context) (*Application, error) {
 
 	// 1. Initial Logger for Config Loading
 	initLogger, _ := logger.New(logDirectory, LogFileName)
-	configuration, configLoadError := config.Load(ConfigFileName, initLogger)
+	configuration, configLoadError := config.Load("", initLogger)
 	if configLoadError != nil {
 		_ = initLogger.Close()
 		return nil, configLoadError
@@ -93,14 +93,14 @@ func newApplication(parentContext context.Context) (*Application, error) {
 	}
 
 	// 4. Stores
-	pngStore, pngStoreError := getObjectStore(parentContext, jetStreamContext, configuration.NATS.ObjectStore.PNGBucket)
+	pngStore, pngStoreError := getObjectStore(parentContext, jetStreamContext, events.BucketPngFiles)
 	if pngStoreError != nil {
 		natsConnection.Close()
 		_ = appLogger.Close()
 		return nil, pngStoreError
 	}
 
-	textStore, textStoreError := getObjectStore(parentContext, jetStreamContext, configuration.NATS.ObjectStore.TextBucket)
+	textStore, textStoreError := getObjectStore(parentContext, jetStreamContext, events.BucketTextFiles)
 	if textStoreError != nil {
 		natsConnection.Close()
 		_ = appLogger.Close()
@@ -129,10 +129,10 @@ func newApplication(parentContext context.Context) (*Application, error) {
 		natsConnection,
 		jetStreamContext,
 		jetStreamContext,
-		configuration.NATS.Consumer.Stream,
-		configuration.NATS.Consumer.Subject,
+		events.StreamPngFiles,
+		events.SubjectPngCreated,
 		configuration.NATS.Consumer.Durable,
-		configuration.NATS.Producer.Subject,
+		events.SubjectExtractionCompleted,
 		llmClient,
 		appLogger,
 		pngStore,

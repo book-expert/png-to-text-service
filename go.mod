@@ -8,7 +8,6 @@ require (
 	github.com/book-expert/logger v0.1.4
 	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats.go v1.48.0
-	github.com/pelletier/go-toml/v2 v2.2.4
 	google.golang.org/genai v1.41.0
 )
 
