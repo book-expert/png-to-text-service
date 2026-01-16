@@ -1,6 +1,6 @@
 /* DO EVERYTHING WITH LOVE, CARE, HONESTY, TRUTH, TRUST, KINDNESS, RELIABILITY, CONSISTENCY, DISCIPLINE, RESILIENCE, CRAFTSMANSHIP, HUMILITY, ALLIANCE, EXPLICITNESS */
 
-package worker
+package processor
 
 import (
 	"bytes"
@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/book-expert/common-events"
-	"github.com/book-expert/common-worker"
+	worker "github.com/book-expert/common-worker"
 	"github.com/book-expert/logger"
 	"github.com/book-expert/png-to-text-service/internal/llm"
 	"github.com/google/uuid"
@@ -76,7 +76,7 @@ func NewProcessor(
 	return pngProcessor, nil
 }
 
-// Start executes the underlying worker engine.
+// Start executes the underlying processor engine.
 func (processor *Processor) Start(systemContext context.Context) error {
 	return processor.engine.Start(systemContext)
 }

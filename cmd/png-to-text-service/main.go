@@ -12,7 +12,7 @@ import (
 	"github.com/book-expert/logger"
 	"github.com/book-expert/png-to-text-service/internal/config"
 	"github.com/book-expert/png-to-text-service/internal/llm"
-	"github.com/book-expert/png-to-text-service/internal/worker"
+	"github.com/book-expert/png-to-text-service/internal/processor"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -27,7 +27,7 @@ type Application struct {
 	serviceLogger    *logger.Logger
 	natsConnection   *nats.Conn
 	jetStreamContext jetstream.JetStream
-	processor        *worker.Processor
+	processor        *processor.Processor
 }
 
 func main() {
@@ -125,7 +125,7 @@ func newApplication(parentContext context.Context) (*Application, error) {
 	}
 
 	// 6. Processor
-	processorInstance, processorInitializationError := worker.NewProcessor(
+	processorInstance, processorInitializationError := processor.NewProcessor(
 		natsConnection,
 		jetStreamContext,
 		jetStreamContext,
