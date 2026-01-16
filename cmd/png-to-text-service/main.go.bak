@@ -132,7 +132,7 @@ func newApplication(parentContext context.Context) (*Application, error) {
 		events.StreamPngFiles,
 		events.SubjectPngCreated,
 		configuration.NATS.Consumer.DurableName,
-		events.SubjectTextCompleted,
+		events.SubjectExtractionCompleted,
 		llmProcessor,
 		serviceLogger,
 		pngObjectStore,

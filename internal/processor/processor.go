@@ -87,12 +87,18 @@ func (processor *Processor) handleMessage(requestContext context.Context, event 
 
 	processor.serviceLogger.Infof("Processing: %s (Page %d)", event.PngKey, event.PageNumber)
 
+	// Lifecycle: Initialized
+	processor.publishLifecycleEvent(parentContext, event, events.SubjectTextInitialized)
+
 	if workflowError := processor.executeWorkflow(parentContext, event); workflowError != nil {
 		processor.serviceLogger.Errorf("Workflow failed [%s]: %v", event.PngKey, workflowError)
 		// Nak with delay to allow retry
 		_ = message.NakWithDelay(10 * time.Second)
 		return workflowError
 	}
+
+	// Lifecycle: Completed
+	processor.publishLifecycleEvent(parentContext, event, events.SubjectTextCompleted)
 
 	processor.serviceLogger.Successf("Completed: %s", event.PngKey)
 	return nil
@@ -104,6 +110,12 @@ func (processor *Processor) executeWorkflow(parentContext context.Context, event
 	if downloadError != nil {
 		return fmt.Errorf("download: %w", downloadError)
 	}
+
+	// Lifecycle: Ready (for LLM)
+	processor.publishLifecycleEvent(parentContext, event, events.SubjectTextReady)
+
+	// Lifecycle: Started (LLM active)
+	processor.publishLifecycleEvent(parentContext, event, events.SubjectTextStarted)
 
 	// Step 2: Extract text via LLM
 	extractedText, llmError := processor.llmProcessor.ProcessImage(parentContext, event.PngKey, pngData, event.Settings)
@@ -120,12 +132,28 @@ func (processor *Processor) executeWorkflow(parentContext context.Context, event
 		return fmt.Errorf("store: %w", storeError)
 	}
 
-	// Step 4: Publish
-	if completionError := processor.publishCompletion(parentContext, event, textKey); completionError != nil {
-		return fmt.Errorf("publish: %w", completionError)
+	// Step 4: Publish Created (triggers next step)
+	if completionError := processor.publishCreated(parentContext, event, textKey); completionError != nil {
+		return fmt.Errorf("publish created: %w", completionError)
 	}
 
 	return nil
+}
+
+func (processor *Processor) publishLifecycleEvent(ctx context.Context, source *events.PngCreatedEvent, subject string) {
+	lifecycleEvent := events.TextStartedEvent{
+		Header: events.EventHeader{
+			WorkflowIdentifier: source.Header.WorkflowIdentifier,
+			UserIdentifier:     source.Header.UserIdentifier,
+			TenantIdentifier:   source.Header.TenantIdentifier,
+			EventIdentifier:    uuid.New().String(),
+			Timestamp:          time.Now().UTC(),
+		},
+		PageNumber: source.PageNumber,
+		TotalPages: source.TotalPages,
+	}
+	data, _ := json.Marshal(lifecycleEvent)
+	_, _ = processor.jetStreamPublisher.Publish(ctx, subject, data)
 }
 
 func (processor *Processor) downloadPNG(parentContext context.Context, key string) ([]byte, error) {
@@ -156,8 +184,8 @@ func (processor *Processor) storeText(parentContext context.Context, event *even
 	return textKey, putError
 }
 
-func (processor *Processor) publishCompletion(parentContext context.Context, source *events.PngCreatedEvent, textKey string) error {
-	event := events.TextProcessedEvent{
+func (processor *Processor) publishCreated(parentContext context.Context, source *events.PngCreatedEvent, textKey string) error {
+	event := events.TextCreatedEvent{
 		Header: events.EventHeader{
 			WorkflowIdentifier: source.Header.WorkflowIdentifier,
 			UserIdentifier:     source.Header.UserIdentifier,
