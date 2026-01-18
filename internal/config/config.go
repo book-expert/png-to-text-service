@@ -30,12 +30,14 @@ type LLMSettings struct {
 	Model                     string
 	MaxRetries                int
 	TimeoutSeconds            int
-	Temperature               float64
-	SystemInstruction         string
-	ExtractionPrompt          string
-}
-
-// NATSSettings defines connection and consumer settings for NATS.
+		Temperature       float64
+		MaxOutputTokens   int
+		SystemInstruction string
+		ExtractionPrompt  string
+	}
+	
+	// NATSSettings defines connection and consumer settings for NATS.
+	
 type NATSSettings struct {
 	URL        string
 	DLQSubject string
@@ -62,6 +64,7 @@ func Load(_ string, _ *logger.Logger) (*Config, error) {
 	configuration.LLM.MaxRetries = getEnvironmentVariableAsInteger("PNG_TO_TEXT_MAX_RETRIES", 3)
 	configuration.LLM.TimeoutSeconds = getEnvironmentVariableAsInteger("PNG_TO_TEXT_TIMEOUT_SECONDS", 90)
 	configuration.LLM.Temperature = getEnvironmentVariableAsFloat("PNG_TO_TEXT_TEMPERATURE", 0.0)
+	configuration.LLM.MaxOutputTokens = getEnvironmentVariableAsInteger("PNG_TO_TEXT_MAX_OUTPUT_TOKENS", 8192)
 	configuration.LLM.ExtractionPrompt = os.Getenv("PNG_TO_TEXT_EXTRACTION_PROMPT")
 	configuration.LLM.SystemInstruction = os.Getenv("PNG_TO_TEXT_SYSTEM_INSTRUCTION")
 

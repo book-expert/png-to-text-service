@@ -88,9 +88,10 @@ func (processor *Processor) handleMessage(requestContext context.Context, event 
 	processor.serviceLogger.Infof("Processing: %s (Page %d)", event.PngKey, event.PageNumber)
 
 	// Lifecycle: Initialized
-	processor.publishLifecycleEvent(parentContext, event, events.SubjectTextInitialized)
+	processor.publishLifecycleEvent(parentContext, event, "", events.SubjectTextInitialized)
 
-	if workflowError := processor.executeWorkflow(parentContext, event); workflowError != nil {
+	textKey, workflowError := processor.executeWorkflow(parentContext, event)
+	if workflowError != nil {
 		processor.serviceLogger.Errorf("Workflow failed [%s]: %v", event.PngKey, workflowError)
 		// Nak with delay to allow retry
 		_ = message.NakWithDelay(10 * time.Second)
@@ -98,29 +99,29 @@ func (processor *Processor) handleMessage(requestContext context.Context, event 
 	}
 
 	// Lifecycle: Completed
-	processor.publishLifecycleEvent(parentContext, event, events.SubjectTextCompleted)
+	processor.publishLifecycleEvent(parentContext, event, textKey, events.SubjectTextCompleted)
 
 	processor.serviceLogger.Successf("Completed: %s", event.PngKey)
 	return nil
 }
 
-func (processor *Processor) executeWorkflow(parentContext context.Context, event *events.PngCreatedEvent) error {
+func (processor *Processor) executeWorkflow(parentContext context.Context, event *events.PngCreatedEvent) (string, error) {
+	// Lifecycle: Ready
+	processor.publishLifecycleEvent(parentContext, event, "", events.SubjectTextReady)
+
 	// Step 1: Download image
 	pngData, downloadError := processor.downloadPNG(parentContext, event.PngKey)
 	if downloadError != nil {
-		return fmt.Errorf("download: %w", downloadError)
+		return "", fmt.Errorf("download: %w", downloadError)
 	}
 
-	// Lifecycle: Ready (for LLM)
-	processor.publishLifecycleEvent(parentContext, event, events.SubjectTextReady)
-
 	// Lifecycle: Started (LLM active)
-	processor.publishLifecycleEvent(parentContext, event, events.SubjectTextStarted)
+	processor.publishLifecycleEvent(parentContext, event, "", events.SubjectTextStarted)
 
 	// Step 2: Extract text via LLM
 	extractedText, llmError := processor.llmProcessor.ProcessImage(parentContext, event.PngKey, pngData, event.Settings)
 	if llmError != nil {
-		return fmt.Errorf("llm: %w", llmError)
+		return "", fmt.Errorf("llm: %w", llmError)
 	}
 
 	// JSON format the extracted text segments for the tts-service contract
@@ -129,19 +130,19 @@ func (processor *Processor) executeWorkflow(parentContext context.Context, event
 	// Step 3: Store (Idempotent)
 	textKey, storeError := processor.storeText(parentContext, event, string(jsonText))
 	if storeError != nil {
-		return fmt.Errorf("store: %w", storeError)
+		return "", fmt.Errorf("store: %w", storeError)
 	}
 
 	// Step 4: Publish Created (triggers next step)
 	if completionError := processor.publishCreated(parentContext, event, textKey); completionError != nil {
-		return fmt.Errorf("publish created: %w", completionError)
+		return "", fmt.Errorf("publish created: %w", completionError)
 	}
 
-	return nil
+	return textKey, nil
 }
 
-func (processor *Processor) publishLifecycleEvent(ctx context.Context, source *events.PngCreatedEvent, subject string) {
-	lifecycleEvent := events.TextStartedEvent{
+func (processor *Processor) publishLifecycleEvent(ctx context.Context, source *events.PngCreatedEvent, textKey, subject string) {
+	lifecycleEvent := events.TextCreatedEvent{
 		Header: events.EventHeader{
 			WorkflowIdentifier: source.Header.WorkflowIdentifier,
 			UserIdentifier:     source.Header.UserIdentifier,
@@ -149,8 +150,11 @@ func (processor *Processor) publishLifecycleEvent(ctx context.Context, source *e
 			EventIdentifier:    uuid.New().String(),
 			Timestamp:          time.Now().UTC(),
 		},
+		PngKey:     source.PngKey,
+		TextKey:    textKey,
 		PageNumber: source.PageNumber,
 		TotalPages: source.TotalPages,
+		Settings:   source.Settings,
 	}
 	data, _ := json.Marshal(lifecycleEvent)
 	_, _ = processor.jetStreamPublisher.Publish(ctx, subject, data)

@@ -2,22 +2,25 @@
 
 package llm
 
+/*
+#cgo LDFLAGS: -lzigllm
+#include <llm.h>
+#include <stdlib.h>
+*/
+import "C"
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/book-expert/common-events"
 	"github.com/book-expert/logger"
-	"google.golang.org/genai"
 )
 
 const (
-	MimeTypePNG = "image/png"
-	RetryDelay  = 2 * time.Second
+	RetryDelay = 2 * time.Second
 )
 
 var (
@@ -29,6 +32,7 @@ type Config struct {
 	APIKey            string
 	Model             string
 	Temperature       float64
+	MaxOutputTokens   int
 	TimeoutSeconds    int
 	MaxRetries        int
 	SystemInstruction string
@@ -36,36 +40,47 @@ type Config struct {
 }
 
 type Processor struct {
-	client *genai.Client
+	handle C.zig_llm_handle_t
 	logger *logger.Logger
 	config Config
 }
 
-func NewProcessor(parentContext context.Context, configuration *Config, serviceLogger *logger.Logger) (*Processor, error) {
-	client, clientError := genai.NewClient(parentContext, &genai.ClientConfig{
-		APIKey: configuration.APIKey,
-	})
-	if clientError != nil {
-		return nil, fmt.Errorf("failed to create GenAI client: %w", clientError)
+func NewProcessor(_ context.Context, configuration *Config, serviceLogger *logger.Logger) (*Processor, error) {
+	apiKey := C.CString(configuration.APIKey)
+	defer C.free(unsafe.Pointer(apiKey))
+	model := C.CString(configuration.Model)
+	defer C.free(unsafe.Pointer(model))
+
+	zigConfig := C.zig_llm_config_t{
+		api_key:           apiKey,
+		model:             model,
+		max_output_tokens: C.int32_t(configuration.MaxOutputTokens),
+		temperature:       C.float(configuration.Temperature),
+	}
+
+	handle := C.zig_llm_init(zigConfig)
+	if handle == nil {
+		return nil, errors.New("failed to initialize Zig LLM client")
 	}
 
 	return &Processor{
-		client: client,
+		handle: handle,
 		config: *configuration,
 		logger: serviceLogger,
 	}, nil
 }
 
-func (processor *Processor) ProcessImage(parentContext context.Context, objectID string, imageData []byte, settings *events.JobSettings) (string, error) {
+func (processor *Processor) Close() {
+	if processor.handle != nil {
+		C.zig_llm_deinit(processor.handle)
+		processor.handle = nil
+	}
+}
+
+func (processor *Processor) ProcessImage(parentContext context.Context, _ string, imageData []byte, settings *events.JobSettings) (string, error) {
 	if len(imageData) == 0 {
 		return "", ErrFileEmpty
 	}
-
-	uploadedFile, uploadError := processor.uploadFile(parentContext, objectID, imageData)
-	if uploadError != nil {
-		return "", uploadError
-	}
-	defer processor.cleanupFile(uploadedFile.Name)
 
 	var exclusions, augmentation string
 	if settings != nil {
@@ -85,7 +100,7 @@ func (processor *Processor) ProcessImage(parentContext context.Context, objectID
 		userPrompt = "Extract the text from this image."
 	}
 
-	extractedText, generationError := processor.generateWithRetries(parentContext, uploadedFile, systemInstruction, userPrompt)
+	extractedText, generationError := processor.generateWithRetries(parentContext, imageData, systemInstruction, userPrompt)
 	if generationError != nil {
 		return "", generationError
 	}
@@ -118,33 +133,11 @@ func (processor *Processor) buildVisionSystemInstruction(exclusions string, augm
 	return instruction
 }
 
-func (processor *Processor) uploadFile(parentContext context.Context, objectID string, data []byte) (*genai.File, error) {
-	uploadConfig := &genai.UploadFileConfig{
-		DisplayName: fmt.Sprintf("ocr-%s", objectID),
-		MIMEType:    MimeTypePNG,
-	}
-
-	file, uploadError := processor.client.Files.Upload(parentContext, bytes.NewReader(data), uploadConfig)
-	if uploadError != nil {
-		return nil, fmt.Errorf("upload failed: %w", uploadError)
-	}
-	return file, nil
-}
-
-func (processor *Processor) cleanupFile(fileName string) {
-	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelCleanup()
-
-	if _, deletionError := processor.client.Files.Delete(cleanupContext, fileName, nil); deletionError != nil {
-		processor.logger.Warnf("Failed to delete remote file %s: %v", fileName, deletionError)
-	}
-}
-
-func (processor *Processor) generateWithRetries(parentContext context.Context, file *genai.File, systemInstruction string, userPrompt string) (string, error) {
+func (processor *Processor) generateWithRetries(parentContext context.Context, imageData []byte, systemInstruction string, userPrompt string) (string, error) {
 	var lastError error
 
 	for attempt := 1; attempt <= processor.config.MaxRetries; attempt++ {
-		result, callError := processor.callGenAIModel(parentContext, file, systemInstruction, userPrompt)
+		result, callError := processor.callZigLLM(parentContext, imageData, systemInstruction, userPrompt)
 		if callError == nil {
 			return result, nil
 		}
@@ -165,42 +158,30 @@ func (processor *Processor) generateWithRetries(parentContext context.Context, f
 	return "", fmt.Errorf("all %d attempts failed: %w", processor.config.MaxRetries, lastError)
 }
 
-func (processor *Processor) callGenAIModel(parentContext context.Context, file *genai.File, systemInstruction string, userPrompt string) (string, error) {
-	generationContext, cancelGeneration := context.WithTimeout(parentContext, time.Duration(processor.config.TimeoutSeconds)*time.Second)
-	defer cancelGeneration()
+func (processor *Processor) callZigLLM(_ context.Context, imageData []byte, systemInstruction string, userPrompt string) (string, error) {
+	cSystemInstruction := C.CString(systemInstruction)
+	defer C.free(unsafe.Pointer(cSystemInstruction))
+	cUserPrompt := C.CString(userPrompt)
+	defer C.free(unsafe.Pointer(cUserPrompt))
+	cMimeType := C.CString("image/png")
+	defer C.free(unsafe.Pointer(cMimeType))
 
-	temperature := float32(processor.config.Temperature)
+	cImageData := (*C.char)(unsafe.Pointer(&imageData[0]))
+	cImageLen := C.size_t(len(imageData))
 
-	response, generationError := processor.client.Models.GenerateContent(
-		generationContext,
-		processor.config.Model,
-		[]*genai.Content{
-			{
-				Parts: []*genai.Part{
-					{FileData: &genai.FileData{FileURI: file.URI, MIMEType: file.MIMEType}},
-					{Text: userPrompt},
-				},
-			},
-		},
-		&genai.GenerateContentConfig{
-			Temperature: &temperature,
-			SystemInstruction: &genai.Content{
-				Parts: []*genai.Part{{Text: systemInstruction}},
-			},
-		},
+	resultPtr := C.zig_llm_prompt_inline(
+		processor.handle,
+		cSystemInstruction,
+		cUserPrompt,
+		cImageData,
+		cImageLen,
+		cMimeType,
 	)
-	if generationError != nil {
-		return "", fmt.Errorf("generation failed: %w", generationError)
-	}
 
-	if response == nil || len(response.Candidates) == 0 {
-		return "", ErrNoCandidates
+	if resultPtr == nil {
+		return "", errors.New("zig llm prompt failed")
 	}
+	defer C.zig_llm_free_string(resultPtr)
 
-	var stringBuilder strings.Builder
-	for _, part := range response.Candidates[0].Content.Parts {
-		stringBuilder.WriteString(part.Text)
-	}
-
-	return stringBuilder.String(), nil
+	return C.GoString(resultPtr), nil
 }
