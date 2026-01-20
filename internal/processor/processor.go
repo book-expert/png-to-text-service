@@ -119,16 +119,15 @@ func (processor *Processor) executeWorkflow(parentContext context.Context, event
 	processor.publishLifecycleEvent(parentContext, event, "", events.SubjectTextStarted)
 
 	// Step 2: Extract text via LLM
-	extractedText, llmError := processor.llmProcessor.ProcessImage(parentContext, event.PngKey, pngData, event.Settings)
+	extractedText, llmError := processor.llmProcessor.ProcessImage(parentContext, event.PngKey, pngData, event.Settings, "text/plain", "")
 	if llmError != nil {
 		return "", fmt.Errorf("llm: %w", llmError)
 	}
 
-	// JSON format the extracted text segments for the tts-service contract
-	jsonText, _ := json.Marshal([]string{extractedText})
+	processor.serviceLogger.Infof("Extracted Text: %s", extractedText)
 
 	// Step 3: Store (Idempotent)
-	textKey, storeError := processor.storeText(parentContext, event, string(jsonText))
+	textKey, storeError := processor.storeText(parentContext, event, extractedText)
 	if storeError != nil {
 		return "", fmt.Errorf("store: %w", storeError)
 	}
@@ -142,21 +141,45 @@ func (processor *Processor) executeWorkflow(parentContext context.Context, event
 }
 
 func (processor *Processor) publishLifecycleEvent(ctx context.Context, source *events.PngCreatedEvent, textKey, subject string) {
-	lifecycleEvent := events.TextCreatedEvent{
-		Header: events.EventHeader{
-			WorkflowIdentifier: source.Header.WorkflowIdentifier,
-			UserIdentifier:     source.Header.UserIdentifier,
-			TenantIdentifier:   source.Header.TenantIdentifier,
-			EventIdentifier:    uuid.New().String(),
-			Timestamp:          time.Now().UTC(),
-		},
-		PngKey:     source.PngKey,
-		TextKey:    textKey,
-		PageNumber: source.PageNumber,
-		TotalPages: source.TotalPages,
-		Settings:   source.Settings,
+	var data []byte
+	header := events.EventHeader{
+		WorkflowIdentifier: source.Header.WorkflowIdentifier,
+		UserIdentifier:     source.Header.UserIdentifier,
+		TenantIdentifier:   source.Header.TenantIdentifier,
+		EventIdentifier:    uuid.New().String(),
+		Timestamp:          time.Now().UTC(),
 	}
-	data, _ := json.Marshal(lifecycleEvent)
+
+	switch subject {
+	case events.SubjectTextInitialized:
+		event := events.TextInitializedEvent{Header: header}
+		data, _ = json.Marshal(event)
+	case events.SubjectTextReady:
+		event := events.TextReadyEvent{Header: header}
+		data, _ = json.Marshal(event)
+	case events.SubjectTextStarted:
+		event := events.TextStartedEvent{
+			Header:     header,
+			PageNumber: source.PageNumber,
+			TotalPages: source.TotalPages,
+		}
+		data, _ = json.Marshal(event)
+	case events.SubjectTextCompleted:
+		event := events.TextCompletedEvent{
+			Header:     header,
+			TextKey:    textKey,
+			PageNumber: source.PageNumber,
+			TotalPages: source.TotalPages,
+		}
+		data, _ = json.Marshal(event)
+	default:
+		// Fallback to minimal container if unknown
+		container := struct {
+			Header events.EventHeader `json:"Header"`
+		}{Header: header}
+		data, _ = json.Marshal(container)
+	}
+
 	_, _ = processor.jetStreamPublisher.Publish(ctx, subject, data)
 }
 
@@ -177,7 +200,7 @@ func (processor *Processor) downloadPNG(parentContext context.Context, key strin
 
 func (processor *Processor) storeText(parentContext context.Context, event *events.PngCreatedEvent, content string) (string, error) {
 	baseName := strings.TrimSuffix(event.PngKey, ".png")
-	textKey := baseName + ".json"
+	textKey := baseName + ".txt"
 
 	metadata := jetstream.ObjectMeta{
 		Name:        textKey,

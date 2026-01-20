@@ -6,12 +6,29 @@ package llm
 #cgo LDFLAGS: -lzigllm
 #include <llm.h>
 #include <stdlib.h>
+#include <string.h>
+
+void GoHttpClientCallback(
+	void* allocator_handle,
+	char* method,
+	char* url,
+	char* headers,
+	void* body,
+	size_t body_length,
+	char** response_body_out,
+	size_t* response_body_length_out,
+	uint16_t* status_out
+);
 */
 import "C"
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -40,34 +57,102 @@ type Config struct {
 }
 
 type Processor struct {
-	handle C.zig_llm_handle_t
-	logger *logger.Logger
-	config Config
+	handle        C.zig_llm_handle_t
+	serviceLogger *logger.Logger
+	configuration Config
 }
 
-func NewProcessor(_ context.Context, configuration *Config, serviceLogger *logger.Logger) (*Processor, error) {
-	apiKey := C.CString(configuration.APIKey)
-	defer C.free(unsafe.Pointer(apiKey))
-	model := C.CString(configuration.Model)
-	defer C.free(unsafe.Pointer(model))
+var (
+	httpClient = &http.Client{
+		Timeout: 90 * time.Second,
+	}
+)
 
-	zigConfig := C.zig_llm_config_t{
+func NewProcessor(_ context.Context, configuration *Config, serviceLogger *logger.Logger) (*Processor, error) {
+	apiKey := unsafe.Pointer(unsafe.StringData(configuration.APIKey))
+	model := unsafe.Pointer(unsafe.StringData(configuration.Model))
+
+	zigConfiguration := C.zig_llm_config_t{
 		api_key:           apiKey,
+		api_key_len:       C.size_t(len(configuration.APIKey)),
 		model:             model,
+		model_len:         C.size_t(len(configuration.Model)),
 		max_output_tokens: C.int32_t(configuration.MaxOutputTokens),
 		temperature:       C.float(configuration.Temperature),
+		http_callback:     (C.zig_llm_http_callback)(unsafe.Pointer(C.GoHttpClientCallback)),
 	}
 
-	handle := C.zig_llm_init(zigConfig)
-	if handle == nil {
-		return nil, errors.New("failed to initialize Zig LLM client")
+	handle := C.zig_llm_init(zigConfiguration)
+	if (handle == nil) {
+		return nil, errors.New("failed to initialize high-integrity Zig LLM client")
 	}
 
 	return &Processor{
-		handle: handle,
-		config: *configuration,
-		logger: serviceLogger,
+		handle:        handle,
+		configuration: *configuration,
+		serviceLogger: serviceLogger,
 	}, nil
+}
+
+//export GoHttpClientCallback
+func GoHttpClientCallback(
+	allocatorHandle unsafe.Pointer,
+	method *C.char,
+	url *C.char,
+	headers *C.char,
+	body unsafe.Pointer,
+	bodyLength C.size_t,
+	responseBodyOut **C.char,
+	responseBodyLengthOut *C.size_t,
+	statusOut *C.uint16_t,
+) {
+	goMethod := C.GoString(method)
+	goUrl := C.GoString(url)
+	goHeaders := C.GoString(headers)
+	goBody := C.GoBytes(body, C.int(bodyLength))
+
+	req, err := http.NewRequest(goMethod, goUrl, bytes.NewReader(goBody))
+	if err != nil {
+		*statusOut = 500
+		return
+	}
+
+	// Set Headers
+	lines := strings.Split(goHeaders, "\r\n")
+	for _, line := range lines {
+		if parts := strings.SplitN(line, ": ", 2); len(parts) == 2 {
+			req.Header.Set(parts[0], parts[1])
+		}
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		*statusOut = 500
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	*statusOut = C.uint16_t(resp.StatusCode)
+
+	var resultBody []byte
+	// Special Case: Step 1 of Gemini Resumable Upload
+	// We need to return the X-Goog-Upload-URL header as the body
+	if resp.Header.Get("X-Goog-Upload-URL") != "" {
+		resultBody = []byte(resp.Header.Get("X-Goog-Upload-URL"))
+	} else {
+		resultBody, _ = io.ReadAll(resp.Body)
+	}
+
+	fmt.Printf("[GO] Received body length: %d\n", len(resultBody))
+
+	*responseBodyLengthOut = C.size_t(len(resultBody))
+	if len(resultBody) > 0 {
+		cBody := C.zig_llm_alloc(allocatorHandle, C.size_t(len(resultBody)))
+		if cBody != nil {
+			C.memcpy(cBody, unsafe.Pointer(&resultBody[0]), C.size_t(len(resultBody)))
+			*responseBodyOut = (*C.char)(cBody)
+		}
+	}
 }
 
 func (processor *Processor) Close() {
@@ -77,7 +162,14 @@ func (processor *Processor) Close() {
 	}
 }
 
-func (processor *Processor) ProcessImage(parentContext context.Context, _ string, imageData []byte, settings *events.JobSettings) (string, error) {
+func (processor *Processor) ProcessImage(
+	parentContext context.Context,
+	_ string,
+	imageData []byte,
+	settings *events.JobSettings,
+	responseMimeType string,
+	responseJsonSchema string,
+) (string, error) {
 	if len(imageData) == 0 {
 		return "", ErrFileEmpty
 	}
@@ -95,21 +187,16 @@ func (processor *Processor) ProcessImage(parentContext context.Context, _ string
 
 	systemInstruction := processor.buildVisionSystemInstruction(exclusions, augmentation, textDirective)
 
-	userPrompt := processor.config.ExtractionPrompt
+	userPrompt := processor.configuration.ExtractionPrompt
 	if userPrompt == "" {
 		userPrompt = "Extract the text from this image."
 	}
 
-	extractedText, generationError := processor.generateWithRetries(parentContext, imageData, systemInstruction, userPrompt)
-	if generationError != nil {
-		return "", generationError
-	}
-
-	return extractedText, nil
+	return processor.processImageWithRetries(parentContext, imageData, "image/png", systemInstruction, userPrompt, responseMimeType, responseJsonSchema)
 }
 
 func (processor *Processor) buildVisionSystemInstruction(exclusions string, augmentation string, textDirective string) string {
-	instruction := processor.config.SystemInstruction
+	instruction := processor.configuration.SystemInstruction
 	if instruction == "" {
 		instruction = "You are an expert narrator. Extract text cleanly."
 	}
@@ -133,19 +220,51 @@ func (processor *Processor) buildVisionSystemInstruction(exclusions string, augm
 	return instruction
 }
 
-func (processor *Processor) generateWithRetries(parentContext context.Context, imageData []byte, systemInstruction string, userPrompt string) (string, error) {
+func (processor *Processor) processImageWithRetries(
+	parentContext context.Context,
+	data []byte,
+	mimeType string,
+	systemInstruction string,
+	userPrompt string,
+	responseMimeType string,
+	responseJsonSchema string,
+) (string, error) {
 	var lastError error
 
-	for attempt := 1; attempt <= processor.config.MaxRetries; attempt++ {
-		result, callError := processor.callZigLLM(parentContext, imageData, systemInstruction, userPrompt)
-		if callError == nil {
-			return result, nil
+	pData := unsafe.Pointer(&data[0])
+	pMime := unsafe.Pointer(unsafe.StringData(mimeType))
+	pSys := unsafe.Pointer(unsafe.StringData(systemInstruction))
+	pUsr := unsafe.Pointer(unsafe.StringData(userPrompt))
+
+	var pRespMime, pRespSchema unsafe.Pointer
+	if responseMimeType != "" {
+		pRespMime = unsafe.Pointer(unsafe.StringData(responseMimeType))
+	}
+	if responseJsonSchema != "" {
+		pRespSchema = unsafe.Pointer(unsafe.StringData(responseJsonSchema))
+	}
+
+	for attempt := 1; attempt <= processor.configuration.MaxRetries; attempt++ {
+		resultPointer := C.zig_llm_process_image(
+			processor.handle,
+			pData, C.size_t(len(data)),
+			pMime, C.size_t(len(mimeType)),
+			pSys, C.size_t(len(systemInstruction)),
+			pUsr, C.size_t(len(userPrompt)),
+			pRespMime, C.size_t(len(responseMimeType)),
+			pRespSchema, C.size_t(len(responseJsonSchema)),
+		)
+
+		if resultPointer != nil {
+			text := C.GoString(resultPointer)
+			C.zig_llm_free_string(resultPointer)
+			return text, nil
 		}
 
-		lastError = callError
-		processor.logger.Warnf("LLM attempt %d/%d failed: %v", attempt, processor.config.MaxRetries, callError)
+		lastError = errors.New("high-integrity orchestration failed in Zig")
+		processor.serviceLogger.Warnf("Process image attempt %d/%d failed", attempt, processor.configuration.MaxRetries)
 
-		if attempt < processor.config.MaxRetries {
+		if attempt < processor.configuration.MaxRetries {
 			select {
 			case <-parentContext.Done():
 				return "", parentContext.Err()
@@ -154,34 +273,5 @@ func (processor *Processor) generateWithRetries(parentContext context.Context, i
 			}
 		}
 	}
-
-	return "", fmt.Errorf("all %d attempts failed: %w", processor.config.MaxRetries, lastError)
-}
-
-func (processor *Processor) callZigLLM(_ context.Context, imageData []byte, systemInstruction string, userPrompt string) (string, error) {
-	cSystemInstruction := C.CString(systemInstruction)
-	defer C.free(unsafe.Pointer(cSystemInstruction))
-	cUserPrompt := C.CString(userPrompt)
-	defer C.free(unsafe.Pointer(cUserPrompt))
-	cMimeType := C.CString("image/png")
-	defer C.free(unsafe.Pointer(cMimeType))
-
-	cImageData := (*C.char)(unsafe.Pointer(&imageData[0]))
-	cImageLen := C.size_t(len(imageData))
-
-	resultPtr := C.zig_llm_prompt_inline(
-		processor.handle,
-		cSystemInstruction,
-		cUserPrompt,
-		cImageData,
-		cImageLen,
-		cMimeType,
-	)
-
-	if resultPtr == nil {
-		return "", errors.New("zig llm prompt failed")
-	}
-	defer C.zig_llm_free_string(resultPtr)
-
-	return C.GoString(resultPtr), nil
+	return "", lastError
 }

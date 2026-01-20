@@ -85,6 +85,8 @@ func newApplication(parentContext context.Context) (*Application, error) {
 	}
 	_ = initialLogger.Close()
 
+	serviceLogger.Infof("Loaded configuration. System Instruction Length: %d", len(configuration.LLM.SystemInstruction))
+
 	// 3. NATS setup
 	natsConnection, jetStreamContext, natsSetupError := setupNATS(configuration)
 	if natsSetupError != nil {
