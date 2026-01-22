@@ -14,13 +14,14 @@ void GoHttpClientCallback(
 	char* url,
 	char* headers,
 	void* body,
-	size_t body_length,
-	char** response_body_out,
-	size_t* response_body_length_out,
-	uint16_t* status_out
+	uint32_t body_length,
+	char** response_body_output,
+	uint32_t* response_body_length_output,
+	uint16_t* status_output
 );
 */
 import "C"
+
 import (
 	"bytes"
 	"context"
@@ -32,12 +33,21 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/book-expert/common-events"
+	events "github.com/book-expert/common-events"
 	"github.com/book-expert/logger"
 )
 
 const (
-	RetryDelay = 2 * time.Second
+	RetryDelay                   = 2 * time.Second
+	DefaultMimeTypePNG           = "image/png"
+	DefaultExtractionUserPrompt  = "Extract the text from this image."
+	DefaultSystemInstruction     = "You are an expert narrator. Extract text cleanly."
+	ExclusionInstructionFormat   = "\n\nCRITICAL EXCLUSIONS (Do NOT Read):\n"
+	StructuralInstructionFormat  = "\n\nSTRUCTURAL CLEANUP RULES:\n"
+	AugmentationInstructionFormat = "\n\nNARRATIVE AUGMENTATION REQUEST:\n"
+	AugmentationNote              = "\n\n(Note: You are permitted to insert descriptive text for visuals or explanations IF requested above. Integrate these naturally into the narrative flow, without using brackets, labels, or special tags like [DESCRIPTION]. The goal is a seamless audio book experience.)"
+	AllocationFloor              = 20 * 1024 * 1024
+	DefaultTimeout               = 120 * time.Second
 )
 
 var (
@@ -48,6 +58,7 @@ var (
 type Config struct {
 	APIKey            string
 	Model             string
+	BaseURL           string
 	Temperature       float64
 	MaxOutputTokens   int
 	TimeoutSeconds    int
@@ -62,28 +73,29 @@ type Processor struct {
 	configuration Config
 }
 
-var (
-	httpClient = &http.Client{
-		Timeout: 90 * time.Second,
-	}
-)
+var httpClient = &http.Client{
+	Timeout: DefaultTimeout,
+}
 
 func NewProcessor(_ context.Context, configuration *Config, serviceLogger *logger.Logger) (*Processor, error) {
 	apiKey := unsafe.Pointer(unsafe.StringData(configuration.APIKey))
 	model := unsafe.Pointer(unsafe.StringData(configuration.Model))
+	baseURL := unsafe.Pointer(unsafe.StringData(configuration.BaseURL))
 
 	zigConfiguration := C.zig_llm_config_t{
 		api_key:           apiKey,
-		api_key_len:       C.size_t(len(configuration.APIKey)),
+		api_key_length:    C.uint32_t(len(configuration.APIKey)),
 		model:             model,
-		model_len:         C.size_t(len(configuration.Model)),
+		model_length:      C.uint32_t(len(configuration.Model)),
+		base_url:          baseURL,
+		base_url_length:   C.uint32_t(len(configuration.BaseURL)),
 		max_output_tokens: C.int32_t(configuration.MaxOutputTokens),
 		temperature:       C.float(configuration.Temperature),
 		http_callback:     (C.zig_llm_http_callback)(unsafe.Pointer(C.GoHttpClientCallback)),
 	}
 
 	handle := C.zig_llm_init(zigConfiguration)
-	if (handle == nil) {
+	if handle == nil {
 		return nil, errors.New("failed to initialize high-integrity Zig LLM client")
 	}
 
@@ -101,57 +113,58 @@ func GoHttpClientCallback(
 	url *C.char,
 	headers *C.char,
 	body unsafe.Pointer,
-	bodyLength C.size_t,
-	responseBodyOut **C.char,
-	responseBodyLengthOut *C.size_t,
-	statusOut *C.uint16_t,
+	bodyLength C.uint32_t,
+	responseBodyOutput **C.char,
+	responseBodyLengthOutput *C.uint32_t,
+	statusOutput *C.uint16_t,
 ) {
 	goMethod := C.GoString(method)
 	goUrl := C.GoString(url)
 	goHeaders := C.GoString(headers)
 	goBody := C.GoBytes(body, C.int(bodyLength))
 
-	req, err := http.NewRequest(goMethod, goUrl, bytes.NewReader(goBody))
-	if err != nil {
-		*statusOut = 500
+	request, error := http.NewRequest(goMethod, goUrl, bytes.NewReader(goBody))
+	if error != nil {
+		*statusOutput = 500
 		return
 	}
 
-	// Set Headers
 	lines := strings.Split(goHeaders, "\r\n")
 	for _, line := range lines {
 		if parts := strings.SplitN(line, ": ", 2); len(parts) == 2 {
-			req.Header.Set(parts[0], parts[1])
+			request.Header.Set(parts[0], parts[1])
 		}
 	}
 
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		*statusOut = 500
+	response, error := httpClient.Do(request)
+	if error != nil {
+		*statusOutput = 500
 		return
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = response.Body.Close() }()
 
-	*statusOut = C.uint16_t(resp.StatusCode)
+	*statusOutput = C.uint16_t(response.StatusCode)
 
-	var resultBody []byte
-	// Special Case: Step 1 of Gemini Resumable Upload
-	// We need to return the X-Goog-Upload-URL header as the body
-	if resp.Header.Get("X-Goog-Upload-URL") != "" {
-		resultBody = []byte(resp.Header.Get("X-Goog-Upload-URL"))
-	} else {
-		resultBody, _ = io.ReadAll(resp.Body)
+	var buffer bytes.Buffer
+	buffer.Grow(AllocationFloor)
+	_, _ = io.Copy(&buffer, response.Body)
+	resultBody := buffer.Bytes()
+
+	fmt.Printf("[GO] Received streaming body length: %d (Enforcing 20MB allocation floor)\n", len(resultBody))
+
+	*responseBodyLengthOutput = C.uint32_t(len(resultBody))
+
+	allocSize := len(resultBody)
+	if allocSize < AllocationFloor {
+		allocSize = AllocationFloor
 	}
 
-	fmt.Printf("[GO] Received body length: %d\n", len(resultBody))
-
-	*responseBodyLengthOut = C.size_t(len(resultBody))
-	if len(resultBody) > 0 {
-		cBody := C.zig_llm_alloc(allocatorHandle, C.size_t(len(resultBody)))
-		if cBody != nil {
+	cBody := C.zig_llm_alloc(allocatorHandle, C.uint32_t(allocSize))
+	if cBody != nil {
+		if len(resultBody) > 0 {
 			C.memcpy(cBody, unsafe.Pointer(&resultBody[0]), C.size_t(len(resultBody)))
-			*responseBodyOut = (*C.char)(cBody)
 		}
+		*responseBodyOutput = (*C.char)(cBody)
 	}
 }
 
@@ -189,33 +202,29 @@ func (processor *Processor) ProcessImage(
 
 	userPrompt := processor.configuration.ExtractionPrompt
 	if userPrompt == "" {
-		userPrompt = "Extract the text from this image."
+		userPrompt = DefaultExtractionUserPrompt
 	}
 
-	return processor.processImageWithRetries(parentContext, imageData, "image/png", systemInstruction, userPrompt, responseMimeType, responseJsonSchema)
+	return processor.processImageWithRetries(parentContext, imageData, DefaultMimeTypePNG, systemInstruction, userPrompt, responseMimeType, responseJsonSchema)
 }
 
 func (processor *Processor) buildVisionSystemInstruction(exclusions string, augmentation string, textDirective string) string {
 	instruction := processor.configuration.SystemInstruction
 	if instruction == "" {
-		instruction = "You are an expert narrator. Extract text cleanly."
+		instruction = DefaultSystemInstruction
 	}
 
 	if exclusions != "" {
-		instruction += "\n\nCRITICAL EXCLUSIONS (Do NOT Read):\n" + exclusions
+		instruction += ExclusionInstructionFormat + exclusions
 	}
 
 	if textDirective != "" {
-		instruction += "\n\nSTRUCTURAL CLEANUP RULES:\n" + textDirective
+		instruction += StructuralInstructionFormat + textDirective
 	}
 
 	if augmentation != "" {
-		instruction += "\n\nNARRATIVE AUGMENTATION REQUEST:\n" + augmentation + "\n\n(Note: You are permitted to insert descriptive text for visuals or explanations IF requested above. Integrate these naturally into the narrative flow, without using brackets, labels, or special tags like [DESCRIPTION]. The goal is a seamless audio book experience.)"
-	} else {
-		instruction += "\n\nCRITICAL: Output ONLY the spoken text. Do NOT output metadata, headers, scene descriptions, or music cues. The output must be pure transcript."
+		instruction += AugmentationInstructionFormat + augmentation + AugmentationNote
 	}
-
-	instruction += "\n\nIf the page consists PRIMARILY of excluded content (like a full References page), output ONLY the string \"[NO_SPEECH]\"."
 
 	return instruction
 }
@@ -229,30 +238,30 @@ func (processor *Processor) processImageWithRetries(
 	responseMimeType string,
 	responseJsonSchema string,
 ) (string, error) {
-	var lastError error
+	var finalError error
 
-	pData := unsafe.Pointer(&data[0])
-	pMime := unsafe.Pointer(unsafe.StringData(mimeType))
-	pSys := unsafe.Pointer(unsafe.StringData(systemInstruction))
-	pUsr := unsafe.Pointer(unsafe.StringData(userPrompt))
+	dataPointer := unsafe.Pointer(&data[0])
+	mimeTypePointer := unsafe.Pointer(unsafe.StringData(mimeType))
+	systemInstructionPointer := unsafe.Pointer(unsafe.StringData(systemInstruction))
+	userPromptPointer := unsafe.Pointer(unsafe.StringData(userPrompt))
 
-	var pRespMime, pRespSchema unsafe.Pointer
+	var responseMimeTypePointer, responseJsonSchemaPointer unsafe.Pointer
 	if responseMimeType != "" {
-		pRespMime = unsafe.Pointer(unsafe.StringData(responseMimeType))
+		responseMimeTypePointer = unsafe.Pointer(unsafe.StringData(responseMimeType))
 	}
 	if responseJsonSchema != "" {
-		pRespSchema = unsafe.Pointer(unsafe.StringData(responseJsonSchema))
+		responseJsonSchemaPointer = unsafe.Pointer(unsafe.StringData(responseJsonSchema))
 	}
 
 	for attempt := 1; attempt <= processor.configuration.MaxRetries; attempt++ {
 		resultPointer := C.zig_llm_process_image(
 			processor.handle,
-			pData, C.size_t(len(data)),
-			pMime, C.size_t(len(mimeType)),
-			pSys, C.size_t(len(systemInstruction)),
-			pUsr, C.size_t(len(userPrompt)),
-			pRespMime, C.size_t(len(responseMimeType)),
-			pRespSchema, C.size_t(len(responseJsonSchema)),
+			dataPointer, C.uint32_t(len(data)),
+			mimeTypePointer, C.uint32_t(len(mimeType)),
+			systemInstructionPointer, C.uint32_t(len(systemInstruction)),
+			userPromptPointer, C.uint32_t(len(userPrompt)),
+			responseMimeTypePointer, C.uint32_t(len(responseMimeType)),
+			responseJsonSchemaPointer, C.uint32_t(len(responseJsonSchema)),
 		)
 
 		if resultPointer != nil {
@@ -261,7 +270,7 @@ func (processor *Processor) processImageWithRetries(
 			return text, nil
 		}
 
-		lastError = errors.New("high-integrity orchestration failed in Zig")
+		finalError = errors.New("high-integrity orchestration failed in Zig")
 		processor.serviceLogger.Warnf("Process image attempt %d/%d failed", attempt, processor.configuration.MaxRetries)
 
 		if attempt < processor.configuration.MaxRetries {
@@ -273,5 +282,5 @@ func (processor *Processor) processImageWithRetries(
 			}
 		}
 	}
-	return "", lastError
+	return "", finalError
 }

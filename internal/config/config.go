@@ -68,12 +68,12 @@ func Load(promptConfigPath string, _ *logger.Logger) (*Config, error) {
 	configuration.Service.Workers = getEnvironmentVariableAsInteger("PNG_TO_TEXT_WORKERS", 5)
 
 	configuration.LLM.APIKeyEnvironmentVariable = "GEMINI_API_KEY"
-	configuration.LLM.BaseURL = getEnvironmentVariable("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com")
+	configuration.LLM.BaseURL = getEnvironmentVariable("GEMINI_BASE_ADDRESS", "https://generativelanguage.googleapis.com")
 	configuration.LLM.Model = getEnvironmentVariable("PNG_TO_TEXT_LLM_MODEL", "gemini-2.5-flash")
 	configuration.LLM.MaxRetries = getEnvironmentVariableAsInteger("PNG_TO_TEXT_MAX_RETRIES", 3)
 	configuration.LLM.TimeoutSeconds = getEnvironmentVariableAsInteger("PNG_TO_TEXT_TIMEOUT_SECONDS", 90)
 	configuration.LLM.Temperature = getEnvironmentVariableAsFloat("PNG_TO_TEXT_TEMPERATURE", 0.0)
-	configuration.LLM.MaxOutputTokens = getEnvironmentVariableAsInteger("PNG_TO_TEXT_MAX_OUTPUT_TOKENS", 8192)
+	configuration.LLM.MaxOutputTokens = getEnvironmentVariableAsInteger("PNG_TO_TEXT_MAX_OUTPUT_TOKENS", 65536)
 
 	configuration.NATS.URL = getEnvironmentVariable("NATS_ADDRESS", "nats://localhost:4222")
 	configuration.NATS.DLQSubject = getEnvironmentVariable("PNG_TO_TEXT_DLQ_SUBJECT", "png.to.text.dlq")
