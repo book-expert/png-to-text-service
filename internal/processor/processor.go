@@ -119,7 +119,7 @@ func (processor *Processor) executeWorkflow(parentContext context.Context, event
 	processor.publishLifecycleEvent(parentContext, event, "", events.SubjectTextStarted)
 
 	// Step 2: Extract text via LLM
-	extractedText, llmError := processor.llmProcessor.ProcessImage(parentContext, event.PngKey, pngData, event.Settings, "text/plain", "")
+	extractedText, llmError := processor.llmProcessor.ProcessImage(parentContext, event.PngKey, pngData, event.Settings, event.RefinedPrompt, "text/plain", "")
 	if llmError != nil {
 		return "", fmt.Errorf("llm: %w", llmError)
 	}

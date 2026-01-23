@@ -105,6 +105,7 @@ func (processor *Processor) ProcessImage(
 	_ string,
 	imageData []byte,
 	settings *events.JobSettings,
+	refinedPrompt string,
 	responseMimeType string,
 	responseJsonSchema string,
 ) (string, error) {
@@ -112,18 +113,21 @@ func (processor *Processor) ProcessImage(
 		return "", ErrFileEmpty
 	}
 
-	var exclusions, augmentation string
-	if settings != nil {
-		exclusions = settings.Exclusions
-		augmentation = settings.AugmentationPrompt
-	}
+	systemInstruction := refinedPrompt
+	if systemInstruction == "" {
+		var exclusions, augmentation string
+		if settings != nil {
+			exclusions = settings.Exclusions
+			augmentation = settings.AugmentationPrompt
+		}
 
-	var textDirective string
-	if settings != nil && settings.AudioSessionConfig != nil {
-		textDirective = settings.AudioSessionConfig.TextDirective
-	}
+		var textDirective string
+		if settings != nil && settings.AudioSessionConfig != nil {
+			textDirective = settings.AudioSessionConfig.TextDirective
+		}
 
-	systemInstruction := processor.buildVisionSystemInstruction(exclusions, augmentation, textDirective)
+		systemInstruction = processor.buildVisionSystemInstruction(exclusions, augmentation, textDirective)
+	}
 
 	userPrompt := processor.configuration.ExtractionPrompt
 	if userPrompt == "" {
