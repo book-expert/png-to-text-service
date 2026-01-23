@@ -29,7 +29,6 @@ type LLMSettings struct {
 	APIKeyEnvironmentVariable string
 	LlmAddress                string
 	Model                     string
-	Provider                  string // "GEMINI" or "OPENAI"
 	MaxRetries                int
 	TimeoutSeconds            int
 	Temperature               float64
@@ -70,11 +69,10 @@ func Load(promptConfigPath string, _ *logger.Logger) (*Config, error) {
 
 	configuration.LLM.APIKeyEnvironmentVariable = "GEMINI_API_KEY"
 	
-	// Default to Native URL if not specified
-	configuration.LLM.LlmAddress = getEnvironmentVariable("GEMINI_LLM_ADDRESS", "https://generativelanguage.googleapis.com")
-	configuration.LLM.Provider = getEnvironmentVariable("PNG_TO_TEXT_LLM_PROVIDER", "GEMINI")
+	// Standard: Use _ADDRESS
+	configuration.LLM.LlmAddress = getEnvironmentVariable("GEMINI_LLM_ADDRESS", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")
 	
-	configuration.LLM.Model = getEnvironmentVariable("PNG_TO_TEXT_LLM_MODEL", "gemini-2.5-flash")
+	configuration.LLM.Model = getEnvironmentVariable("PNG_TO_TEXT_LLM_MODEL", "gemini-3-pro-preview")
 	configuration.LLM.MaxRetries = getEnvironmentVariableAsInteger("PNG_TO_TEXT_MAX_RETRIES", 3)
 	configuration.LLM.TimeoutSeconds = getEnvironmentVariableAsInteger("PNG_TO_TEXT_TIMEOUT_SECONDS", 180)
 	configuration.LLM.Temperature = getEnvironmentVariableAsFloat("PNG_TO_TEXT_TEMPERATURE", 0.30)

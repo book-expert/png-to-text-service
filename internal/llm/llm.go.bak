@@ -2,34 +2,46 @@
 
 package llm
 
+/*
+#cgo LDFLAGS: -lcppclient
+#include <llm.h>
+#include <stdlib.h>
+#include <string.h>
+*/
+import "C"
+
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"strings"
 	"time"
+	"unsafe"
 
-	"github.com/book-expert/common-events"
+	events "github.com/book-expert/common-events"
 	"github.com/book-expert/logger"
-	"google.golang.org/genai"
 )
 
 const (
-	MimeTypePNG = "image/png"
-	RetryDelay  = 2 * time.Second
+	RetryDelay                   = 2 * time.Second
+	DefaultMimeTypePNG           = "image/png"
+	DefaultExtractionUserPrompt  = "Extract the text from this image."
+	DefaultSystemInstruction     = "You are an expert narrator. Extract text cleanly."
+	ExclusionInstructionFormat   = "\n\nCRITICAL EXCLUSIONS (Do NOT Read):\n"
+	StructuralInstructionFormat  = "\n\nSTRUCTURAL CLEANUP RULES:\n"
+	AugmentationInstructionFormat = "\n\nNARRATIVE AUGMENTATION REQUEST:\n"
+	AugmentationNote              = "\n\n(Note: You are permitted to insert descriptive text for visuals or explanations IF requested above. Integrate these naturally into the narrative flow, without using brackets, labels, or special tags like [DESCRIPTION]. The goal is a seamless audio book experience.)"
 )
 
 var (
 	ErrFileEmpty    = errors.New("input file data is empty")
-	ErrNoCandidates = errors.New("no candidates found in LLM response")
+	ErrLlmInitFailed = errors.New("failed to initialize C++ LLM client")
 )
 
 type Config struct {
 	APIKey            string
 	Model             string
+	LlmAddress        string // Renamed from BaseURL per standards
 	Temperature       float64
-	MaxOutputTokens   int
+	MaxTokens         int    // Renamed from MaxOutputTokens
 	TimeoutSeconds    int
 	MaxRetries        int
 	SystemInstruction string
@@ -37,36 +49,62 @@ type Config struct {
 }
 
 type Processor struct {
-	client *genai.Client
-	logger *logger.Logger
-	config Config
+	handle        C.llm_handle_t
+	serviceLogger *logger.Logger
+	configuration Config
 }
 
-func NewProcessor(parentContext context.Context, configuration *Config, serviceLogger *logger.Logger) (*Processor, error) {
-	client, clientError := genai.NewClient(parentContext, &genai.ClientConfig{
-		APIKey: configuration.APIKey,
-	})
-	if clientError != nil {
-		return nil, fmt.Errorf("failed to create GenAI client: %w", clientError)
+func NewProcessor(_ context.Context, configuration *Config, serviceLogger *logger.Logger) (*Processor, error) {
+	apiKey := C.CString(configuration.APIKey)
+	defer C.free(unsafe.Pointer(apiKey))
+	
+	model := C.CString(configuration.Model)
+	defer C.free(unsafe.Pointer(model))
+	
+	llmAddress := C.CString(configuration.LlmAddress)
+	defer C.free(unsafe.Pointer(llmAddress))
+
+	cppConfiguration := C.LlmConfig{
+		api_key:            apiKey,
+		api_key_length:     C.uint32_t(len(configuration.APIKey)),
+		model:              model,
+		model_length:       C.uint32_t(len(configuration.Model)),
+		llm_address:        llmAddress,
+		llm_address_length: C.uint32_t(len(configuration.LlmAddress)),
+		max_tokens:         C.int32_t(configuration.MaxTokens),
+		temperature:        C.float(configuration.Temperature),
+	}
+
+	handle := C.llm_init(cppConfiguration)
+	if handle == nil {
+		return nil, ErrLlmInitFailed
 	}
 
 	return &Processor{
-		client: client,
-		config: *configuration,
-		logger: serviceLogger,
+		handle:        handle,
+		configuration: *configuration,
+		serviceLogger: serviceLogger,
 	}, nil
 }
 
-func (processor *Processor) ProcessImage(parentContext context.Context, objectID string, imageData []byte, settings *events.JobSettings) (string, error) {
+func (processor *Processor) Close() {
+	if processor.handle != nil {
+		C.llm_deinit(processor.handle)
+		processor.handle = nil
+	}
+}
+
+func (processor *Processor) ProcessImage(
+	parentContext context.Context,
+	_ string,
+	imageData []byte,
+	settings *events.JobSettings,
+	responseMimeType string,
+	responseJsonSchema string,
+) (string, error) {
 	if len(imageData) == 0 {
 		return "", ErrFileEmpty
 	}
-
-	uploadedFile, uploadError := processor.uploadFile(parentContext, objectID, imageData)
-	if uploadError != nil {
-		return "", uploadError
-	}
-	defer processor.cleanupFile(uploadedFile.Name)
 
 	var exclusions, augmentation string
 	if settings != nil {
@@ -81,79 +119,88 @@ func (processor *Processor) ProcessImage(parentContext context.Context, objectID
 
 	systemInstruction := processor.buildVisionSystemInstruction(exclusions, augmentation, textDirective)
 
-	userPrompt := processor.config.ExtractionPrompt
+	userPrompt := processor.configuration.ExtractionPrompt
 	if userPrompt == "" {
-		userPrompt = "Extract the text from this image."
+		userPrompt = DefaultExtractionUserPrompt
 	}
 
-	extractedText, generationError := processor.generateWithRetries(parentContext, uploadedFile, systemInstruction, userPrompt)
-	if generationError != nil {
-		return "", generationError
-	}
-
-	return extractedText, nil
+	return processor.processImageWithRetries(parentContext, imageData, DefaultMimeTypePNG, systemInstruction, userPrompt, responseMimeType, responseJsonSchema)
 }
 
 func (processor *Processor) buildVisionSystemInstruction(exclusions string, augmentation string, textDirective string) string {
-	instruction := processor.config.SystemInstruction
+	instruction := processor.configuration.SystemInstruction
 	if instruction == "" {
-		instruction = "You are an expert narrator. Extract text cleanly."
+		instruction = DefaultSystemInstruction
 	}
 
 	if exclusions != "" {
-		instruction += "\n\nCRITICAL EXCLUSIONS (Do NOT Read):\n" + exclusions
+		instruction += ExclusionInstructionFormat + exclusions
 	}
 
 	if textDirective != "" {
-		instruction += "\n\nSTRUCTURAL CLEANUP RULES:\n" + textDirective
+		instruction += StructuralInstructionFormat + textDirective
 	}
 
 	if augmentation != "" {
-		instruction += "\n\nNARRATIVE AUGMENTATION REQUEST:\n" + augmentation + "\n\n(Note: You are permitted to insert descriptive text for visuals or explanations IF requested above. Integrate these naturally into the narrative flow, without using brackets, labels, or special tags like [DESCRIPTION]. The goal is a seamless audio book experience.)"
-	} else {
-		instruction += "\n\nCRITICAL: Output ONLY the spoken text. Do NOT output metadata, headers, scene descriptions, or music cues. The output must be pure transcript."
+		instruction += AugmentationInstructionFormat + augmentation + AugmentationNote
 	}
-
-	instruction += "\n\nIf the page consists PRIMARILY of excluded content (like a full References page), output ONLY the string \"[NO_SPEECH]\"."
 
 	return instruction
 }
 
-func (processor *Processor) uploadFile(parentContext context.Context, objectID string, data []byte) (*genai.File, error) {
-	uploadConfig := &genai.UploadFileConfig{
-		DisplayName: fmt.Sprintf("ocr-%s", objectID),
-		MIMEType:    MimeTypePNG,
+func (processor *Processor) processImageWithRetries(
+	parentContext context.Context,
+	data []byte,
+	mimeType string,
+	systemInstruction string,
+	userPrompt string,
+	responseMimeType string,
+	responseJsonSchema string,
+) (string, error) {
+	var finalError error
+
+	dataPointer := unsafe.Pointer(&data[0])
+	
+	cMimeType := C.CString(mimeType)
+	defer C.free(unsafe.Pointer(cMimeType))
+	
+	cSystemInstruction := C.CString(systemInstruction)
+	defer C.free(unsafe.Pointer(cSystemInstruction))
+	
+	cUserPrompt := C.CString(userPrompt)
+	defer C.free(unsafe.Pointer(cUserPrompt))
+
+	var cResponseMimeType, cResponseJsonSchema *C.char
+	if responseMimeType != "" {
+		cResponseMimeType = C.CString(responseMimeType)
+		defer C.free(unsafe.Pointer(cResponseMimeType))
+	}
+	if responseJsonSchema != "" {
+		cResponseJsonSchema = C.CString(responseJsonSchema)
+		defer C.free(unsafe.Pointer(cResponseJsonSchema))
 	}
 
-	file, uploadError := processor.client.Files.Upload(parentContext, bytes.NewReader(data), uploadConfig)
-	if uploadError != nil {
-		return nil, fmt.Errorf("upload failed: %w", uploadError)
-	}
-	return file, nil
-}
+	for attempt := 1; attempt <= processor.configuration.MaxRetries; attempt++ {
+		resultPointer := C.llm_process_image(
+			processor.handle,
+			dataPointer, C.uint32_t(len(data)),
+			cMimeType, C.uint32_t(len(mimeType)),
+			cSystemInstruction, C.uint32_t(len(systemInstruction)),
+			cUserPrompt, C.uint32_t(len(userPrompt)),
+			cResponseMimeType, C.uint32_t(len(responseMimeType)),
+			cResponseJsonSchema, C.uint32_t(len(responseJsonSchema)),
+		)
 
-func (processor *Processor) cleanupFile(fileName string) {
-	cleanupContext, cancelCleanup := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelCleanup()
-
-	if _, deletionError := processor.client.Files.Delete(cleanupContext, fileName, nil); deletionError != nil {
-		processor.logger.Warnf("Failed to delete remote file %s: %v", fileName, deletionError)
-	}
-}
-
-func (processor *Processor) generateWithRetries(parentContext context.Context, file *genai.File, systemInstruction string, userPrompt string) (string, error) {
-	var lastError error
-
-	for attempt := 1; attempt <= processor.config.MaxRetries; attempt++ {
-		result, callError := processor.callGenAIModel(parentContext, file, systemInstruction, userPrompt)
-		if callError == nil {
-			return result, nil
+		if resultPointer != nil {
+			text := C.GoString(resultPointer)
+			C.llm_free_string(resultPointer)
+			return text, nil
 		}
 
-		lastError = callError
-		processor.logger.Warnf("LLM attempt %d/%d failed: %v", attempt, processor.config.MaxRetries, callError)
+		finalError = errors.New("orchestration failed in C++")
+		processor.serviceLogger.Warnf("Process image attempt %d/%d failed", attempt, processor.configuration.MaxRetries)
 
-		if attempt < processor.config.MaxRetries {
+		if attempt < processor.configuration.MaxRetries {
 			select {
 			case <-parentContext.Done():
 				return "", parentContext.Err()
@@ -162,48 +209,5 @@ func (processor *Processor) generateWithRetries(parentContext context.Context, f
 			}
 		}
 	}
-
-	return "", fmt.Errorf("all %d attempts failed: %w", processor.config.MaxRetries, lastError)
-}
-
-func (processor *Processor) callGenAIModel(parentContext context.Context, file *genai.File, systemInstruction string, userPrompt string) (string, error) {
-	generationContext, cancelGeneration := context.WithTimeout(parentContext, time.Duration(processor.config.TimeoutSeconds)*time.Second)
-	defer cancelGeneration()
-
-	temperature := float32(processor.config.Temperature)
-	maxOutputTokens := int32(processor.config.MaxOutputTokens)
-
-	response, generationError := processor.client.Models.GenerateContent(
-		generationContext,
-		processor.config.Model,
-		[]*genai.Content{
-			{
-				Parts: []*genai.Part{
-					{FileData: &genai.FileData{FileURI: file.URI, MIMEType: file.MIMEType}},
-					{Text: userPrompt},
-				},
-			},
-		},
-		&genai.GenerateContentConfig{
-			Temperature: &temperature,
-			MaxOutputTokens: maxOutputTokens,
-			SystemInstruction: &genai.Content{
-				Parts: []*genai.Part{{Text: systemInstruction}},
-			},
-		},
-	)
-	if generationError != nil {
-		return "", fmt.Errorf("generation failed: %w", generationError)
-	}
-
-	if response == nil || len(response.Candidates) == 0 {
-		return "", ErrNoCandidates
-	}
-
-	var stringBuilder strings.Builder
-	for _, part := range response.Candidates[0].Content.Parts {
-		stringBuilder.WriteString(part.Text)
-	}
-
-	return stringBuilder.String(), nil
+	return "", finalError
 }

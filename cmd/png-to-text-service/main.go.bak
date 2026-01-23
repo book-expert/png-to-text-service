@@ -102,20 +102,20 @@ func newApplication(parentContext context.Context) (*Application, error) {
 		return nil, pngStoreError
 	}
 
-	textObjectStore, textObjectStoreError := getObjectStore(parentContext, jetStreamContext, events.BucketTextFiles)
-	if textObjectStoreError != nil {
+	textObjectStore, textStoreError := getObjectStore(parentContext, jetStreamContext, events.BucketTextFiles)
+	if textStoreError != nil {
 		natsConnection.Close()
 		_ = serviceLogger.Close()
-		return nil, textObjectStoreError
+		return nil, textStoreError
 	}
 
 	// 5. LLM processor
 	llmConfiguration := llm.Config{
 		APIKey:            configuration.GetAPIKey(),
 		Model:             configuration.LLM.Model,
-		LlmAddress:        configuration.LLM.LlmAddress,
+		BaseURL:           configuration.LLM.BaseURL,
 		Temperature:       configuration.LLM.Temperature,
-		MaxTokens:         configuration.LLM.MaxTokens,
+		MaxOutputTokens:   configuration.LLM.MaxOutputTokens,
 		TimeoutSeconds:    configuration.LLM.TimeoutSeconds,
 		MaxRetries:        configuration.LLM.MaxRetries,
 		SystemInstruction: configuration.LLM.SystemInstruction,
