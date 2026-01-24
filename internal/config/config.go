@@ -69,11 +69,11 @@ func Load(promptConfigPath string, _ *logger.Logger) (*Config, error) {
 	configuration.Service.Workers = getEnvironmentVariableAsInteger("PNG_TO_TEXT_WORKERS", 5)
 
 	configuration.LLM.APIKeyEnvironmentVariable = "GEMINI_API_KEY"
-	
-	// Default to Native URL if not specified
-	configuration.LLM.LlmAddress = getEnvironmentVariable("GEMINI_LLM_ADDRESS", "https://generativelanguage.googleapis.com")
+
+	// Use new address var per protocol, fallback to legacy if missing
+	configuration.LLM.LlmAddress = getEnvironmentVariable("GEMINI_BASE_ADDRESS", getEnvironmentVariable("GEMINI_LLM_ADDRESS", "https://generativelanguage.googleapis.com"))
 	configuration.LLM.Provider = getEnvironmentVariable("PNG_TO_TEXT_LLM_PROVIDER", "GEMINI")
-	
+
 	configuration.LLM.Model = getEnvironmentVariable("PNG_TO_TEXT_LLM_MODEL", "gemini-2.5-flash")
 	configuration.LLM.MaxRetries = getEnvironmentVariableAsInteger("PNG_TO_TEXT_MAX_RETRIES", 3)
 	configuration.LLM.TimeoutSeconds = getEnvironmentVariableAsInteger("PNG_TO_TEXT_TIMEOUT_SECONDS", 180)
